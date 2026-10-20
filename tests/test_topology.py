@@ -65,6 +65,36 @@ class TopologyTest(unittest.TestCase):
         self.assertEqual(env["VLLM_ENABLE_ROCE_ALLREDUCE"], "0")
         self.assertTrue(env["NCCL_IB_HCA"].startswith("="))
 
+    def test_nccl_can_use_additional_interfaces_without_changing_peer_routes(self):
+        nodes = copy.deepcopy(self.four)
+        for node in nodes["nodes"]:
+            node["roce_peer_hcas"] = {peer: hcas[:1] for peer, hcas in node["roce_peer_hcas"].items()}
+        node = nodes["nodes"][0]
+        peers = copy.deepcopy(node["roce_peer_hcas"])
+        node["nccl_hcas"] = sorted(node["roce_subnets"])
+        self.assertEqual(topology.problems(self.ring, nodes), [])
+        env = topology.node_environment(self.ring, node)
+        self.assertEqual(env["NCCL_IB_HCA"], "=" + ",".join(node["nccl_hcas"]))
+        self.assertEqual(node["roce_peer_hcas"], peers)
+        oneshot = copy.deepcopy(self.ring)
+        oneshot["fabric"]["transport"] = "oneshot-ring4"
+        env = topology.node_environment(oneshot, node)
+        self.assertEqual(json.loads(env["SPARKNET_ROCE_PEER_HCAS"]), peers)
+        index, queried = spark.roce_gid_setting(oneshot, node)
+        self.assertEqual(index, 3)
+        self.assertEqual(queried, node["nccl_hcas"])
+
+    def test_nccl_interface_override_rejects_missing_primary_or_subnet(self):
+        for selected in ([], ["missing"], ["rocep1s0f0", "rocep1s0f0"], [None], [["bad"]]):
+            nodes = copy.deepcopy(self.four)
+            nodes["nodes"][0]["nccl_hcas"] = selected
+            self.assertTrue(topology.problems(self.ring, nodes))
+        nodes = copy.deepcopy(self.four)
+        node = nodes["nodes"][0]
+        node["nccl_hcas"] = sorted(node["roce_subnets"]) + ["additional"]
+        node["roce_subnets"]["additional"] = "10.123.0.0/16"
+        self.assertTrue(topology.problems(self.ring, nodes))
+
     def test_cli_accepts_a_fourth_node_and_validates_against_selected_map(self):
         args = spark.parser().parse_args(["--cluster-config", "ring4.json", "render", "dgx4"])
         self.assertEqual(args.node, "dgx4")

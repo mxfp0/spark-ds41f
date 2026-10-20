@@ -1,0 +1,12 @@
+{
+  "upstream_revision": "73cf112295c33aee2b895f329f592f2a9b4b0f97",
+  "patched_base": "eeacf1c6343f0499e4e7ab20ec7eecfb6f62eda6",
+  "deployment_base": "10f2ecc82",
+  "production_image": "sha256:4d7f78c58378c22b1dec410cc7afae960facad44079b28e9af2ab95620b56477",
+  "intended_variable": "NCCL subnet discovery and fused-pair selection; same GPU arithmetic and network configuration",
+  "status": "candidate; unqualified",
+  "candidate_source_revision": "8ebd7f5f8e8c92d8197b8f651cf5313ebbc2af71",
+  "initial_rejected_source_revision": "9ceaafe478acc7419419b11555ca62d1b021609b",
+  "published_source_revision": "658ec8396ba3b7ef5b0c22c18bc0fb49ad6f2807",
+  "published_source_tree": "ca7b75178749b23f8a66495a1f990d4aec0414d7"
+}

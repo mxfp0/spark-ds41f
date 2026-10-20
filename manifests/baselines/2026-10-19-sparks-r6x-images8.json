@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "status": "site-qualified-baseline",
+  "captured_at": "2026-10-19T10:07:58.795728+00:00",
+  "scope": "Eight-image per-request cap, three eight-image correctness calls including two concurrent (one streamed), nine-image rejection, text/rates and all-rank health. No performance or capacity benchmark.",
+  "measured_deployment_commit": "98271651bc75cce83ef74c49ce997eb6840c5e2d",
+  "previous_baseline": "manifests/baselines/2026-10-19-sparks-r6x-local-engram-paired-p2p2.json",
+  "shape": "tp4-ring",
+  "nodes": [
+    "spark1",
+    "spark2",
+    "spark3",
+    "spark4"
+  ],
+  "profile": "config/sparks.json",
+  "profile_sha256": "d1a7e6595437b897e3b49d8e72dec1aeb01c8639e4b6b995db3bfcc79651a99b",
+  "image": "deepseek1017-vllm:r6x-tp4-64k",
+  "image_id": "sha256:6e18a9f0e37bfc30a995f33d7644dfd4991e5a3292d2b8aaea696512228e99a8",
+  "checkpoint": {
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "full_checkpoint_only_on": "spark3",
+    "nfs_use": "initial checkpoint loading only",
+    "runtime_engram": "verified local ext4 O_DIRECT on all4"
+  },
+  "nccl": {
+    "library_sha256": "1bfbeb23d3ed1383fe8c77d91c12444d9dd51731b6dba29d63dcfe4e6b0a3ade",
+    "p2p_channels_per_peer": 2,
+    "actual_members_local_remote_qps": [
+      2,
+      2,
+      2
+    ],
+    "one_shot_peer_map": "unchanged primary HCA per cable"
+  },
+  "configured": {
+    "context": 1048576,
+    "concurrency": 16,
+    "kv_gib_per_rank": 10.5,
+    "shared_logical_kv_tokens": 8580566,
+    "dspark_block": 5,
+    "adaptive_verification_row_cost": 0.035,
+    "memory_saver": false,
+    "page_size": 65536,
+    "images_per_prompt": 8
+  },
+  "checks": {
+    "passed": true,
+    "images": [
+      {
+        "name": "eight",
+        "images": 8,
+        "http_status": 200,
+        "passed": true
+      },
+      {
+        "name": "nine",
+        "images": 9,
+        "http_status": 400,
+        "passed": true
+      },
+      {
+        "name": "parallel-eight-0",
+        "images": 8,
+        "http_status": 200,
+        "passed": true
+      },
+      {
+        "name": "parallel-eight-1",
+        "images": 8,
+        "http_status": 200,
+        "passed": true
+      }
+    ],
+    "expected_codes": [
+      "731",
+      "284",
+      "956",
+      "413",
+      "862",
+      "579",
+      "148",
+      "625"
+    ],
+    "image_size": [
+      384,
+      256
+    ],
+    "all4_exact_runtime_guard_image_library_checks": true,
+    "zero_oom_restarts": true,
+    "doctor_errors": 0,
+    "doctor_known_warnings": 12,
+    "dashboard_numeric_rows": [
+      29206,
+      29205
+    ],
+    "preserved": {
+      "passed": true,
+      "native_nfs_identity_pid_start_mounts_unchanged": true,
+      "router_config_unchanged": true
+    },
+    "raw_receipts": "/home/spark/ai/deepseek1017-vllm-tp4/images8-20261019"
+  },
+  "evidence": {
+    "experiment": "experiments/2026-10-19-site-images8/",
+    "raw_receipts": "/home/spark/ai/deepseek1017-vllm-tp4/images8-20261019",
+    "runtime": "runtime-tested.json",
+    "cli_parser": "parser-check.log"
+  },
+  "limits": [
+    "Image checks use 384x256 label cards; high-resolution and sustained image load are not qualified.",
+    "Existing context1M/C16/KV sizing and prior performance receipts are preserved; no new capacity or performance claim."
+  ],
+  "rollback": {
+    "deployment_commit": "63aaee616bb0f4d2551594f1a12e4d9c052db3a0",
+    "procedure": "Unload through router, coordinate Git synchronization across all4, then load through existing managed launcher. Preserve local Engram, custom NCCL, native NFS, host/fabric and GLM."
+  }
+}

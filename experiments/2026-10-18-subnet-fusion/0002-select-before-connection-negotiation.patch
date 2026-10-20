@@ -1,0 +1,167 @@
+From 8ebd7f5f8e8c92d8197b8f651cf5313ebbc2af71 Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 05:06:56 +0200
+Subject: [PATCH] Select peer devices before negotiating connection counts
+
+
+Upstream base: NCCL 2.30.7 73cf112295c33aee2b895f329f592f2a9b4b0f97
+with the repository's adaptive series applied (eeacf1c6343f0499e4e7ab20ec7eecfb6f62eda6).
+Rationale: select complete physical-port pairs that can reach the peer.
+Quality: host handshake and routing only; GPU arithmetic is unchanged.
+Tests: test-selection.py plus the recorded four-Spark site qualification.
+Upstream status: site-only patches, not submitted upstream.
+
+---
+ src/transport/net_ib/connect.cc | 73 ++++++++++++++++-----------------
+ 1 file changed, 35 insertions(+), 38 deletions(-)
+
+diff --git a/src/transport/net_ib/connect.cc b/src/transport/net_ib/connect.cc
+index 84cdded..6a905cf 100644
+--- a/src/transport/net_ib/connect.cc
++++ b/src/transport/net_ib/connect.cc
+@@ -25,7 +25,10 @@ extern int64_t ncclParamIbOooRq();
+ 
+ struct ncclIbDevExtraProps {
+   bool oooRq;
++  union ibv_gid selectedGids[NCCL_IB_MAX_DEVS_PER_NIC];
+ };
++static_assert(sizeof(ncclNetVDeviceProps_t) + sizeof(ncclIbDevExtraProps) <= sizeof(ncclIbConnectionMetadata),
++              "Connection buffer must contain device properties and GIDs");
+ 
+ enum ncclIbCommState {
+   ncclIbCommStateStart = 0,
+@@ -45,6 +48,7 @@ struct ncclIbCommStage {
+   int offset;
+   void* buffer;
+   void* comm;
++  int selectedDev;
+ };
+ 
+ struct ncclIbHandle {
+@@ -752,17 +756,31 @@ void ncclIbSetTrafficClass(void* ctx, int trafficClass) {
+   if (config) config->trafficClass = trafficClass;
+ }
+ 
++static ncclResult_t ncclIbGetExtraProps(ncclIbMergedDev* device, ncclIbDevExtraProps* props) {
++  memset(props, 0, sizeof(*props));
++  props->oooRq = true;
++  for (int i = 0; i < device->vProps.ndevs; i++) {
++    ncclIbDev* ibDev = ncclIbDevs + device->vProps.devs[i];
++    props->oooRq = props->oooRq && ibDev->oooRqSize;
++    if (!ncclParamIbSubnetAwareRouting() || ibDev->portAttr.link_layer != IBV_LINK_LAYER_ETHERNET) continue;
++    int gidIndex = 0;
++    NCCLCHECK(ncclIbGetGidIndex(ibDev->context, ibDev->portNum, &ibDev->portAttr, &gidIndex));
++    NCCLCHECK(wrap_ibv_query_gid(ibDev->context, ibDev->portNum, gidIndex, &props->selectedGids[i]));
++  }
++  return ncclSuccess;
++}
++
+ ncclResult_t ncclIbConnectImpl(void* ctx, int dev, void* opaqueHandle, void** sendComm,
+                                ncclNetDeviceHandle_t** /*sendDevComm*/, int nQpsPerDev, int envTrafficClass) {
+   ncclResult_t ret = ncclSuccess;
+   struct ncclIbHandle* handle = (struct ncclIbHandle*)opaqueHandle;
+ 
+-  // Subnet-aware device selection: use the listener's GIDs (embedded in the
+-  // handle) to find a local NIC on the same subnet as the remote peer.
+-  // For single-subnet or IB deployments, all GIDs are zero → dev stays unchanged.
+-  if (ncclParamIbSubnetAwareRouting()) NCCLCHECK(ncclIbFindDevBySubnet(handle->listenGids, 2, dev, &dev));
+-
+   struct ncclIbCommStage* stage = &handle->stage;
++  if (stage->state == ncclIbCommStateStart) {
++    if (ncclParamIbSubnetAwareRouting()) NCCLCHECK(ncclIbFindDevBySubnet(handle->listenGids, 2, dev, &dev));
++    stage->selectedDev = dev;
++  }
++  dev = stage->selectedDev;
+   struct ncclIbSendComm* comm = (struct ncclIbSendComm*)stage->comm;
+   int ready;
+ 
+@@ -811,11 +829,7 @@ ib_connect_check:
+   memcpy(stage->buffer, &mergedDev->vProps, sizeof(ncclNetVDeviceProps_t));
+ 
+   struct ncclIbDevExtraProps exProps;
+-  exProps.oooRq = true;
+-  for (int i = 0; i < mergedDev->vProps.ndevs; i++) {
+-    int ibDevN = mergedDev->vProps.devs[i];
+-    exProps.oooRq = exProps.oooRq && ncclIbDevs[ibDevN].oooRqSize;
+-  }
++  NCCLCHECKGOTO(ncclIbGetExtraProps(mergedDev, &exProps), ret, fail);
+   comm->base.localOooRq = exProps.oooRq;
+   memcpy((char*)stage->buffer + sizeof(ncclNetVDeviceProps_t), &exProps, sizeof(struct ncclIbDevExtraProps));
+ 
+@@ -848,6 +862,8 @@ ib_recv_dev_list:
+   comm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps; // Select max nqps (local or remote)
+ 
+   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, remoteVProps.ndevs);
++  INFO(NCCL_NET, "NET/IB: negotiated sender dev %d members %d remote %d QPs %d", dev, comm->base.vProps.ndevs,
++       remoteVProps.ndevs, comm->base.nqps);
+ 
+   if (comm->base.resiliency) {
+     NCCLCHECK(ncclIbResiliencyDeviceNumSet(comm->base.resiliency, comm->base.vProps.ndevs, remoteVProps.ndevs));
+@@ -1374,6 +1390,12 @@ ib_recv_dev_list:
+ 
+   memcpy(&exProps, (char*)stage->buffer + sizeof(ncclNetVDeviceProps_t), sizeof(exProps));
+   rComm->base.remOooRq = exProps.oooRq;
++  if (remoteVProps.ndevs < 1 || remoteVProps.ndevs > NCCL_IB_MAX_DEVS_PER_NIC) {
++    ret = ncclInvalidUsage;
++    goto fail;
++  }
++  if (ncclParamIbSubnetAwareRouting())
++    NCCLCHECKGOTO(ncclIbFindDevBySubnet(exProps.selectedGids, remoteVProps.ndevs, lComm->dev, &lComm->dev), ret, fail);
+ 
+   // Reduce the physical device list and store in the connection base
+   struct ncclIbMergedDev* mergedDev;
+@@ -1387,6 +1409,8 @@ ib_recv_dev_list:
+   rComm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps; // Select max nqps (local or remote)
+ 
+   rComm->base.nDataQps = std::max(rComm->base.vProps.ndevs, remoteVProps.ndevs);
++  INFO(NCCL_NET, "NET/IB: negotiated receiver dev %d members %d remote %d QPs %d", lComm->dev,
++       rComm->base.vProps.ndevs, remoteVProps.ndevs, rComm->base.nqps);
+ 
+   if (rComm->base.resiliency) {
+     NCCLCHECK(ncclIbResiliencyDeviceNumSet(rComm->base.resiliency, rComm->base.vProps.ndevs, remoteVProps.ndevs));
+@@ -1395,11 +1419,7 @@ ib_recv_dev_list:
+   stage->offset = 0;
+   stage->state = ncclIbCommStateSendDevList;
+ 
+-  exProps.oooRq = true;
+-  for (int i = 0; i < mergedDev->vProps.ndevs; i++) {
+-    int ibDevN = mergedDev->vProps.devs[i];
+-    exProps.oooRq = exProps.oooRq && ncclIbDevs[ibDevN].oooRqSize;
+-  }
++  NCCLCHECKGOTO(ncclIbGetExtraProps(mergedDev, &exProps), ret, fail);
+   rComm->base.localOooRq = exProps.oooRq;
+   memcpy((char*)stage->buffer + sizeof(ncclNetVDeviceProps_t), &exProps, sizeof(struct ncclIbDevExtraProps));
+ 
+@@ -1420,29 +1440,6 @@ ib_recv:
+   /* copy back the received info */
+   memcpy(&remMeta, stage->buffer, sizeof(struct ncclIbConnectionMetadata));
+ 
+-  // Subnet-aware device selection: use the remote sender's GIDs to find a local
+-  // NIC on the same subnet. Override lComm->dev and update vProps if a
+-  // better device is found.
+-  if (ncclParamIbSubnetAwareRouting() && remMeta.ndevs > 0) {
+-    union ibv_gid remoteGids[NCCL_IB_MAX_DEVS_PER_NIC];
+-    int nRemoteGids = 0;
+-    for (int i = 0; i < remMeta.ndevs && i < NCCL_IB_MAX_DEVS_PER_NIC; i++) {
+-      if (remMeta.devs[i].link_layer == IBV_LINK_LAYER_ETHERNET) {
+-        remoteGids[nRemoteGids++] = remMeta.devs[i].gid;
+-      }
+-    }
+-    int effectiveDev = lComm->dev;
+-    NCCLCHECKGOTO(ncclIbFindDevBySubnet(remoteGids, nRemoteGids, lComm->dev, &effectiveDev), ret, fail);
+-    if (effectiveDev != lComm->dev) {
+-      if (ncclIbMergedDevs[effectiveDev].vProps.ndevs != rComm->base.vProps.ndevs) {
+-        WARN("NET/IB: Subnet routing cannot change device count after connection negotiation");
+-        ret = ncclInvalidUsage;
+-        goto fail;
+-      }
+-      lComm->dev = effectiveDev;
+-      rComm->base.vProps = ncclIbMergedDevs[effectiveDev].vProps;
+-    }
+-  }
+ 
+   // IB setup
+   // Pre-declare variables because of goto
+-- 
+2.43.0
+

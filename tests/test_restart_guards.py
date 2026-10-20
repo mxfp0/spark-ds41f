@@ -136,6 +136,26 @@ class StartAndStopTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(sorted(node for node, argv in calls if argv == ("docker", "stop")), ["dgx1", "dgx2", "dgx3"])
 
+    def test_stop_distinguishes_missing_container_from_inspection_failure(self) -> None:
+        name = CLUSTER["container"]["name"]
+        cases = [(1, f"Error: No such object: {name}", 0),
+                 (1, f"error: no such object: {name}", 0),
+                 (255, "ssh: connection lost", 1),
+                 (1, "Cannot connect to Docker daemon", 1)]
+        for status, error, expected in cases:
+            with self.subTest(status=status, error=error):
+                args = argparse.Namespace(apply=True, cluster_config="config/cluster.json",
+                                          remove=True, parallel=True)
+                with mock.patch.object(spark, "configuration", return_value=(CLUSTER, NODES3, {})), \
+                        mock.patch.object(spark, "expected_command", return_value=TP3), \
+                        mock.patch.object(spark, "live_engine", return_value=None), \
+                        mock.patch.object(spark, "stop_memguard"), \
+                        mock.patch.object(spark, "memguard_is_active", return_value=False), \
+                        mock.patch.object(spark, "run_ssh", return_value=subprocess.CompletedProcess(
+                            [], status, stdout="", stderr=error)), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(spark.command_cluster_stop(args), expected)
+
 
 class LaunchLabelTest(unittest.TestCase):
     def test_containers_record_the_profile_they_started_from(self) -> None:

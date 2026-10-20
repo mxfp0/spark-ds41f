@@ -458,13 +458,24 @@ class KernelBackendTest(unittest.TestCase):
                     self.assertEqual(spark.build_contexts(inputs), spark.BUILD_CONTEXTS)
             elif "serve_args" in data and "container" in data and "kernel_backend" not in data:
                 with self.subTest(profile=relative):
-                    self.assertEqual(kernel_backend.source_problems(data, {"sources": {}}, {}), [])
+                    self.assertEqual(kernel_backend.source_problems(data, {"sources": {name: {} for name in ("vllm", "b12x", "nccl")}}, {}), [])
                     if spark.topology.argument(data, "--attention-backend") == "B12X":
                         self.assertEqual(kernel_backend.problems(data), [])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeOverlayPolicyTest(unittest.TestCase):
+    def test_official_base_can_run_the_native_tilelang_family(self):
+        profile = spark.read_json("config/sparks.json")
+        lock = spark.read_json(profile["upstreams_config"])
+        manifest = spark.read_json(lock["source_manifest"])
+        self.assertEqual(kernel_backend.problems(profile), [])
+        self.assertEqual(kernel_backend.source_problems(profile, lock, manifest), [])
+        lock["sources"].pop("vllm_base_image")
+        self.assertTrue(kernel_backend.source_problems(profile, lock, manifest))
 
 
 class TileLangProfileLabelTest(unittest.TestCase):

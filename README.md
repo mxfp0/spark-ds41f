@@ -1,5 +1,11 @@
 # spark-ds41f
 
+This fork includes the [four-Spark site setup](SITE.md): NFS checkpoint sharing,
+local Engram, paired-interface NCCL, stock-kernel guards and llama-swap hooks.
+Select it with `bin/spark --cluster-config config/sparks.json doctor`. The node
+map is [site/nodes-sparks.json](site/nodes-sparks.json); credentials, weights,
+images, caches and runtime state stay outside Git.
+
 Reproducible Docker/vLLM deployment, tuning, and benchmarks for DeepSeek V4.1
 Flash on a switchless three-node DGX Spark fabric, and the same deployment on
 a four-node ring.

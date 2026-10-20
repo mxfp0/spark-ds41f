@@ -51,6 +51,21 @@ def ready(uuid="node-a"):
 
 
 class ReadinessTest(unittest.TestCase):
+    def test_stock_profile_requires_matching_driver(self):
+        data = ready()
+        profile = {"release": OLD, "page_size": 4096, "memory_saver_required": False}
+        data["driver"] = "580.173.02"
+        self.assertTrue(any("requires NVIDIA" in x for x in kernel.profile_problems("spark1", data, profile, POLICY)))
+
+    def test_host_without_fan_driver_or_memory_saver(self):
+        policy = dict(POLICY, fan_control=False)
+        policy.pop("memory_saver")
+        data = ready()
+        data["modules"].pop("dgx_ec_fan_control")
+        for key in ("fan_dkms", "fan_signer", "fan_key_enrolled"):
+            data.pop(key)
+        self.assertEqual(kernel.findings("spark1", data, policy), ([], []))
+
     def test_staged_not_running_is_success(self):
         self.assertEqual(kernel.findings("dgx1", ready(), POLICY), ([], []))
 
@@ -208,7 +223,7 @@ class RmQualificationTest(unittest.TestCase):
     def test_system_pool_policy_required(self):
         policy = dict(POLICY, rm_system_memory_pools="0")
         profile = {"release": NEW, "page_size": 65536}
-        data = {"kernel": NEW, "page_size": 65536, "rm_system_memory_pools": "529"}
+        data = {"kernel": NEW, "page_size": 65536, "driver": policy["driver"], "rm_system_memory_pools": "529"}
         self.assertTrue(kernel.profile_problems("node", data, profile, policy))
         data["rm_system_memory_pools"] = "0"
         self.assertEqual(kernel.profile_problems("node", data, profile, policy), [])

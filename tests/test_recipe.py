@@ -303,6 +303,17 @@ class OverlayTest(unittest.TestCase):
             recipe.overlay({"extends": {}, "unset": [
                 "container.expected_labels.local.spark3.missing.tree"]}, base)
 
+    def test_append_arguments_preserves_the_base(self):
+        base = recipe.resolve(load("config/cluster.json"), "tp4-ring")
+        original = list(base["serve_args"])
+        arm = {"extends": {}, "append_serve_args": ["--enable-prompt-tokens-details"]}
+        resolved = recipe.overlay(arm, base)
+        self.assertEqual(resolved["serve_args"], original + ["--enable-prompt-tokens-details"])
+        self.assertEqual(base["serve_args"], original)
+        for invalid in ("--flag", [1]):
+            with self.assertRaises(SystemExit):
+                recipe.overlay({"extends": {}, "append_serve_args": invalid}, base)
+
     def test_r6m_changes_only_its_own_settings_over_r6l(self):
         spark = load_spark()
         r6l = load("experiments/2026-10-14-r6l/r6l-release.json")

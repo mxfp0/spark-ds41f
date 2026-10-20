@@ -1,0 +1,10 @@
+**
+!site/
+!site/vllm032/
+!site/vllm032/**
+!experiments/
+!experiments/2026-10-18-local-engram/
+!experiments/2026-10-18-local-engram/local_engram.py
+!experiments/2026-10-18-local-engram/local-plan.json
+site/vllm032/Dockerfile.dockerignore
+site/vllm032/__pycache__

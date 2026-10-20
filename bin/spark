@@ -350,6 +350,8 @@ def ssh_options() -> list[str]:
     return [
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=10",
+        "-o", "ServerAliveCountMax=2",
         "-o", "ControlMaster=auto",
         "-o", f"ControlPath={SSH_CONTROL_DIR}/%C",
         "-o", "ControlPersist=120",
@@ -1079,7 +1081,7 @@ def roce_gid_setting(cluster: dict, node: dict) -> tuple[int, list[str]]:
     mode = topology.transport(cluster)
     key = f"{topology.ONE_SHOT[mode][0]}_GID_INDEX" if mode in topology.ONE_SHOT else "NCCL_IB_GID_INDEX"
     index = int(env.get(key) or env.get("NCCL_IB_GID_INDEX") or 3)
-    hcas = sorted({hca for peers in node["roce_peer_hcas"].values() for hca in peers})
+    hcas = topology.runtime_hcas(node)
     return index, hcas
 
 
@@ -1163,14 +1165,17 @@ def clock_latch_problems(node_name: str, facts: dict[str, str], serving: bool) -
     ]
 
 
-def node_kernel_inventory(nodes: dict, node: dict, policy: dict) -> dict:
-    query = shlex.join(["sudo", "-n", "python3", "-c",
+def node_kernel_inventory(nodes: dict, node: dict, policy: dict, helper: str | None = None) -> dict:
+    query = shlex.join(["sudo", "-n", helper] if helper else
+                       ["sudo", "-n", "python3", "-c",
                         (ROOT / "scripts/kernel_readiness.py").read_text(), json.dumps(policy)])
     result = remote_shell(nodes, node, query)
     try:
         inventory = json.loads(result.stdout)
         if result.returncode or not isinstance(inventory, dict):
             raise ValueError(result.stderr.strip() or "kernel inventory failed")
+        if helper and inventory.get("policy_sha256") != hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest():
+            raise ValueError("installed kernel inventory policy differs from the serving profile")
         return inventory
     except (ValueError, TypeError) as error:
         return {"errors": [str(error)]}
@@ -1188,7 +1193,7 @@ def live_doctor(cluster: dict, nodes: dict) -> list[str]:
     """Findings about the live cluster: errors, and Warn for the minor ones."""
     problems: list[str] = []
     trial_path = kernel_policy_path(cluster)
-    trial = json.loads(trial_path.read_text()) if trial_path.exists() else None
+    trial = json.loads(trial_path.read_text()) if cluster["host"].get("kernel") and trial_path.exists() else None
     kernel_inventories = {}
     corrections = []
     name = cluster["container"]["name"]
@@ -1206,7 +1211,7 @@ def live_doctor(cluster: dict, nodes: dict) -> list[str]:
             except (ValueError, TypeError) as error:
                 problems.append(f"{node['name']}: mesh NIC inventory failed: {error}")
         if trial:
-            inventory = node_kernel_inventory(nodes, node, trial)
+            inventory = node_kernel_inventory(nodes, node, trial, cluster["host"].get("inventory_helper"))
             kernel_inventories[node["name"]] = inventory
             warnings, fixes = kernel_readiness.findings(node["name"], inventory, trial)
             problems.extend(Warn(warning) for warning in warnings)
@@ -1218,12 +1223,13 @@ def live_doctor(cluster: dict, nodes: dict) -> list[str]:
         boot = run_ssh(nodes, node, "efibootmgr")
         problems.extend(boot_order_problems(node["name"], boot.stdout))
         facts = host_facts(remote_shell(nodes, node, HOST_FACTS_QUERY).stdout)
-        problems.extend(modeset_problems(node["name"], facts))
-        problems.extend(fbdev_problems(node["name"], facts))
-        problems.extend(drm_card_problems(node["name"], facts))
-        problems.extend(drm_master_problems(node["name"], facts))
-        problems.extend(console_mode_problems(node["name"], facts))
-        problems.extend(splash_problems(node["name"], facts))
+        if cluster["environment"].get("SPARK3_DISPLAY_CARVEOUT_WEIGHTS") == "1":
+            problems.extend(modeset_problems(node["name"], facts))
+            problems.extend(fbdev_problems(node["name"], facts))
+            problems.extend(drm_card_problems(node["name"], facts))
+            problems.extend(drm_master_problems(node["name"], facts))
+            problems.extend(console_mode_problems(node["name"], facts))
+            problems.extend(splash_problems(node["name"], facts))
         problems.extend(idle_service_warnings(node["name"], facts))
         problems.extend(nvme_coalescing_warnings(node["name"], facts))
         problems.extend(nvme_apst_warnings(node["name"], facts))
@@ -1522,15 +1528,8 @@ def command_status(args: argparse.Namespace) -> int:
             "--format",
             "{{.Names}}|{{.Image}}|{{.Status}}",
         )
-        guard = run_ssh(
-            nodes,
-            node,
-            "systemctl",
-            "is-active",
-            f"{name}-memguard.service",
-        )
         output = result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
-        guard_state = guard.stdout.strip() if guard.returncode == 0 else "inactive"
+        guard_state = "active" if memguard_is_active(cluster, nodes, node) else "inactive"
         print(f"{node['name']}\t{output or 'not running'}\tmemguard={guard_state}")
         failed |= result.returncode != 0 or not bool(result.stdout.strip())
     return int(failed)
@@ -1646,10 +1645,19 @@ def mount_test_script(cluster: dict) -> str:
     lines = []
     for source, _, mode in cluster["container"]["mounts"]:
         source = source.format(home=cluster["host"]["home"])
-        test = "-w" if mode == "rw" else "-r"
-        lines.append(
-            f"test {test} {shlex.quote(source)} || printf '%s %s\\n' {mode} {shlex.quote(source)}"
-        )
+        quoted = shlex.quote(source)
+        if "/" not in source:
+            probe = shlex.join([
+                "timeout", "30", "docker", "run", "--rm", "--network=none",
+                "--read-only", "--memory=128m", "--entrypoint=sh",
+                "-v", f"{source}:/probe:ro", cluster["container"]["image"],
+                "-c", "test -r /probe/config.json",
+            ])
+            check = f"docker volume inspect {quoted} >/dev/null 2>&1 && {probe}"
+        else:
+            test = "-w" if mode == "rw" else "-r"
+            check = f"test {test} {quoted}"
+        lines.append(f"({check}) || printf '%s %s\\n' {mode} {quoted}")
     return "\n".join(lines) + "\ntrue\n"
 
 
@@ -1683,7 +1691,7 @@ def node_runtime_problems(
         problems.append(f"{node['name']}: checkout has uncommitted files")
     if cluster["host"].get("kernel"):
         policy = json.loads(kernel_policy_path(cluster).read_text())
-        inventory = node_kernel_inventory(nodes, node, policy)
+        inventory = node_kernel_inventory(nodes, node, policy, cluster["host"].get("inventory_helper"))
         problems.extend(kernel_readiness.profile_problems(
             node["name"], inventory, cluster["host"]["kernel"], policy))
     gid_index, hcas = roce_gid_setting(cluster, node)
@@ -1731,9 +1739,10 @@ def node_runtime_problems(
         problems.append(
             f"{node['name']}: container {name} already exists; use --replace explicitly"
         )
-    sudo = run_ssh(nodes, node, "sudo", "-n", "true")
-    if sudo.returncode:
-        problems.append(f"{node['name']}: passwordless sudo is unavailable for memguard")
+    helper = cluster["host"].get("memguard_helper")
+    manager = run_ssh(nodes, node, "sudo", "-n", helper, "check") if helper else run_ssh(nodes, node, "sudo", "-n", "true")
+    if manager.returncode:
+        problems.append(f"{node['name']}: configured memguard manager is unavailable")
     return problems
 
 
@@ -1866,12 +1875,15 @@ def command_cluster_sync(args: argparse.Namespace) -> int:
 
 def stop_memguard(cluster: dict, nodes: dict, node: dict) -> subprocess.CompletedProcess[str]:
     unit = f"{cluster['container']['name']}-memguard.service"
+    if helper := cluster["host"].get("memguard_helper"):
+        return run_ssh(nodes, node, "sudo", "-n", helper, "stop")
     return run_ssh(nodes, node, "sudo", "-n", "systemctl", "stop", unit)
 
 
 def memguard_is_active(cluster: dict, nodes: dict, node: dict) -> bool:
     unit = f"{cluster['container']['name']}-memguard.service"
-    result = run_ssh(nodes, node, "systemctl", "is-active", "--quiet", unit)
+    helper = cluster["host"].get("memguard_helper")
+    result = run_ssh(nodes, node, "sudo", "-n", helper, "active") if helper else run_ssh(nodes, node, "systemctl", "is-active", "--quiet", unit)
     return result.returncode == 0
 
 
@@ -1975,7 +1987,9 @@ def start_memguard(
     prelaunch: bool = False,
 ) -> None:
     script = f"{repository_path(cluster)}/scripts/memguard-start.sh"
-    arguments = [script, *memguard_settings(cluster, phase), "prelaunch" if prelaunch else "running"]
+    helper = cluster["host"].get("memguard_helper")
+    command = ["sudo", "-n", helper] if helper else [script]
+    arguments = [*command, *memguard_settings(cluster, phase), "prelaunch" if prelaunch else "running"]
     result = run_ssh(nodes, node, *arguments)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -2349,7 +2363,9 @@ def command_cluster_stop(args: argparse.Namespace) -> int:
             return [], [f"{node['name']}: could not stop memguard: {detail}"]
         exists = run_ssh(nodes, node, "docker", "inspect", name)
         if exists.returncode:
-            return [f"{node['name']}: {name} is already absent"], []
+            if exists.returncode == 1 and f"no such object: {name.lower()}" in exists.stderr.lower():
+                return [f"{node['name']}: {name} is already absent"], []
+            return [], [f"{node['name']}: cannot inspect {name}: {exists.stderr.strip()}"]
         stopped = run_ssh(nodes, node, "docker", "stop", "--time", "60", name)
         if stopped.returncode:
             return [], [f"{node['name']}: {stopped.stderr.strip()}"]
@@ -2557,7 +2573,10 @@ print("GPU import smoke passed")
 
 def build_projects(sources: dict) -> tuple[str, ...]:
     """Git projects declared by the selected lock or prepared inputs."""
-    required = tuple(name for name in BUILD_PROJECTS
+    required = BUILD_PROJECTS
+    if sources.get("vllm", {}).get("runtime_from_base_image") is True:
+        required = tuple(name for name in required if name == "vllm" or name in sources)
+    required = tuple(name for name in required
                      if name != "b12x" or sources.get(name, {}).get("kind") != "pypi-wheel-set")
     for name in required:
         if name not in sources:

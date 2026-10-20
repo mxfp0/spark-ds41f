@@ -116,6 +116,10 @@ def logical_peer_hcas(cluster: dict, node: dict) -> dict:
     return routes
 
 
+def runtime_hcas(node: dict) -> list[str]:
+    return node.get("nccl_hcas", sorted({h for route in node["roce_peer_hcas"].values() for h in route}))
+
+
 def node_environment(cluster: dict, node: dict) -> dict[str, str]:
     env = {key: str(value) for key, value in cluster["environment"].items()}
     env["VLLM_HOST_IP"] = node["management_ip"]
@@ -126,7 +130,7 @@ def node_environment(cluster: dict, node: dict) -> dict[str, str]:
             env.pop("B12X_ROCE_PEER_HCAS", None)
         else:
             env[f"{prefix}_PEER_HCAS"] = json.dumps(logical_peer_hcas(cluster, node), separators=(",", ":"))
-        hcas = sorted({h for route in node["roce_peer_hcas"].values() for h in route})
+        hcas = runtime_hcas(node)
         # '=' makes NCCL match device names exactly rather than by prefix.
         env["NCCL_IB_HCA"] = "=" + ",".join(hcas)
     else:
@@ -261,6 +265,21 @@ def problems(cluster: dict, nodes: dict) -> list[str]:
                     networks.setdefault(str(net), []).append((rank, int(peer), hca, lane))
         if len(set(all_hcas)) != len(all_hcas):
             errors.append(f"{node['name']}: switchless links must use distinct local HCAs")
+        if "nccl_hcas" in node:
+            selected = node["nccl_hcas"]
+            if (not neighbour_ring(mode) or not isinstance(selected, list) or not selected or
+                    any(not isinstance(h, str) or not h for h in selected) or len(set(selected)) != len(selected)):
+                errors.append(f"{node['name']}: nccl_hcas needs distinct HCA names on a neighbour ring")
+            elif not set(all_hcas).issubset(selected):
+                errors.append(f"{node['name']}: nccl_hcas must include every peer HCA")
+            else:
+                for hca in selected:
+                    try:
+                        net = ipaddress.IPv4Network(node.get("roce_subnets", {}).get(hca), strict=True)
+                        if net.prefixlen != 24:
+                            raise ValueError("expected /24")
+                    except (ValueError, TypeError, ipaddress.AddressValueError):
+                        errors.append(f"{node['name']}: nccl_hcas {hca} needs a declared cable /24 subnet")
         if mode in ONE_SHOT and len({len(v) for v in routes.values() if isinstance(v, list)}) != 1:
             errors.append(f"{node['name']}: one-shot collectives require equal stripe counts for every peer")
         gid = node.get("roce_gid_index", 3)

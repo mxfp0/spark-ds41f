@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "status": "site-qualified-baseline",
+  "captured_at": "2026-10-18T23:51:19.867310+00:00",
+  "scope": "r6x adoption: release GPU gate, basic APIs/rates and five source32K plus five capped256-token prose requests; no new capacity qualification",
+  "measured_deployment_commit": "93af2a887b0ddd8e65f2cb15f573a68a6598dcc7",
+  "upstream_recipe_commit": "a125256eb47f2d76f077117cf6e437eb42bfaa1d",
+  "shape": "tp4-ring",
+  "nodes": [
+    "spark1",
+    "spark2",
+    "spark3",
+    "spark4"
+  ],
+  "profile": "config/sparks.json",
+  "profile_sha256": "0dbdc26032d30f5a4cfc9d7d3ad01ca6b25b1a46ce23dc2d19eb6ba5acdb1eae",
+  "image": "deepseek1017-vllm:r6x-tp4-64k",
+  "image_id": "sha256:6e18a9f0e37bfc30a995f33d7644dfd4991e5a3292d2b8aaea696512228e99a8",
+  "vllm_tree": "4d6851c8bb1397a55254ba88905a87d9785b98dc",
+  "checkpoint": {
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "full_checkpoint_only_on": "spark3",
+    "nfs_use": "initial checkpoint loading only",
+    "runtime_engram": "verified local ext4 O_DIRECT on all4"
+  },
+  "nccl": {
+    "library_sha256": "1bfbeb23d3ed1383fe8c77d91c12444d9dd51731b6dba29d63dcfe4e6b0a3ade",
+    "p2p_channels_per_peer": 2,
+    "actual_members_local_remote_qps": [
+      2,
+      2,
+      2
+    ],
+    "one_shot_peer_map": "unchanged primary HCA per cable"
+  },
+  "configured": {
+    "context": 1048576,
+    "concurrency": 16,
+    "kv_gib_per_rank": 10.5,
+    "shared_logical_kv_tokens": 8580566,
+    "dspark_block": 5,
+    "adaptive_verification_row_cost": 0.035,
+    "memory_saver": false,
+    "page_size": 65536
+  },
+  "checks": {
+    "cpu_unit_tests_passed": 436,
+    "local_engram_behavior_test_passed": true,
+    "nccl_selection_harness_passed": true,
+    "release_files": 60,
+    "release_tests_passed": 1680,
+    "release_tests_skipped": 158,
+    "release_tests_failed": 0,
+    "basic_apis": [
+      "arithmetic",
+      "tools and continuation",
+      "vision",
+      "reasoning",
+      "history prefix cache",
+      "four concurrent semantic requests"
+    ],
+    "all4_runtime_guards_images_libraries_match": true,
+    "zero_oom_restarts_rdma_error_drop_deltas": true,
+    "all16_interfaces_positive_rdma_payload": true,
+    "nfs_server_unchanged": true,
+    "router_config_unchanged": true
+  },
+  "workloads": {
+    "source-32768": {
+      "n": 5,
+      "median_tps": 5771.279021779161,
+      "range_tps": [
+        5716.737685143123,
+        5778.938896027764
+      ]
+    },
+    "prose": {
+      "n": 5,
+      "median_tps": 86.59749746234242,
+      "range_tps": [
+        86.31897333432798,
+        86.80889490244307
+      ]
+    }
+  },
+  "all10_uncached_isolated_successful_same_greedy_outputs_as_r6v": true,
+  "runtime_nfs": [
+    {
+      "node": "spark1",
+      "nfs_client_present": true,
+      "nfs_read_rpc_delta": 0
+    },
+    {
+      "node": "spark2",
+      "nfs_client_present": true,
+      "nfs_read_rpc_delta": 0
+    },
+    {
+      "node": "spark3",
+      "nfs_client_present": false,
+      "nfs_read_rpc_delta": null
+    },
+    {
+      "node": "spark4",
+      "nfs_client_present": true,
+      "nfs_read_rpc_delta": 0
+    }
+  ],
+  "dashboard_numeric_rows": [
+    28736,
+    28735
+  ],
+  "startup_to_first_reply_seconds": 213.64701246999903,
+  "model_load_gib_per_rank": 72.19,
+  "evidence": {
+    "experiment": "experiments/2026-10-19-site-r6x/",
+    "raw_receipts": "/home/spark/ai/deepseek1017-vllm-tp4/r6x-20261019",
+    "summary": "qualification-results.json",
+    "runtime": "runtime-qualified.json",
+    "release_gate": "release-gate/verdict.json"
+  },
+  "limits": [
+    "Sequential before/after boots; CPU tests/source preparation overlapped part of r6v baseline; no causal speedup claim",
+    "Interrupted second baseline retained and excluded",
+    "No near1M, sustained C16, full output-cap, full upstream servebench suite or broad quality qualification",
+    "Memory Saver remains deferred"
+  ],
+  "rollback": {
+    "deployment_commit": "caeb4b7f9f2a3e0f8efa50758581701e96f2f1db",
+    "image_id": "sha256:4d7f78c58378c22b1dec410cc7afae960facad44079b28e9af2ab95620b56477",
+    "procedure": "Unload through router, coordinate Git sync to previous commit on all4 and load through same managed launcher. Preserve local Engram, custom NCCL, native NFS and host/fabric settings."
+  }
+}

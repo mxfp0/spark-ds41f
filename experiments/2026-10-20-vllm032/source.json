@@ -49,7 +49,7 @@
     "build_deployment_commit": null
   },
   "deployment_artifacts": {
-    "bin/spark": "d0b2c92cddfa40335a37de8cd38987ab1346702722ca97a1d8cfe66de0bacd3c",
+    "bin/spark": "ad166a0e6312258bdf82f9ed7422756cdded5bb43b30f8bb5a6d963e597cf492",
     "docker/Dockerfile.vllm032": "cc4e98e195800ca39146e7593adfe1d06314e5983f359a3f83c5f174c5096903",
     "requirements/vllm032-aarch64.txt": "9f4b5d2914c0cfeafb95aabfb111041ca75d691a3d6c83fe7e91fc3970670971",
     "requirements/cutlass-dsl-4.8-aarch64.txt": "137ddef81f1e87842a10ab9a7764685e8eebbdb19688b050d9066c21fb7fffad",

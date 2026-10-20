@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unit=deepseek1017-vllm-tp4-memguard.service
+case "$*" in
+  check) test -x /usr/local/libexec/deepseek1017/memguard-start.sh; exit ;;
+  stop) exec systemctl stop "$unit" ;;
+  active) exec systemctl is-active --quiet "$unit" ;;
+  'deepseek1017-vllm-tp4 startup 5 0.25 120 prelaunch' | 'deepseek1017-vllm-tp4 startup 5 0.25 120 running' | 'deepseek1017-vllm-tp4 steady 3 2 0 running')
+    export XDG_RUNTIME_DIR=/run/user/1000
+    exec /usr/local/libexec/deepseek1017/memguard-start.sh "$@"
+    ;;
+  *) echo 'Unsupported guard action' >&2; exit 2 ;;
+esac

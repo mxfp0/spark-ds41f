@@ -1,0 +1,7 @@
+{
+  "recipe_commit": "4cbafc455097aef3a35d2b48e6028ca888613ed3",
+  "image_id": "sha256:4d7f78c58378c22b1dec410cc7afae960facad44079b28e9af2ab95620b56477",
+  "original_rows_sha256": "8da8faf153e783f7d3cbb89e7345f40ccd2b241f4e4027d1448bacc237b3b620",
+  "source_revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+  "changes": "Native Engram source paths only; weights, offsets, kernels, CPU/fabric and precision unchanged"
+}

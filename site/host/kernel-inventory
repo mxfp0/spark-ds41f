@@ -1,0 +1,14 @@
+#!/usr/bin/python3
+import hashlib
+import json
+import sys
+
+if len(sys.argv)!=1:
+    raise SystemExit(2)
+sys.path.insert(0,'/usr/local/libexec/deepseek1017')
+from kernel_readiness import collect
+with open('/usr/local/libexec/deepseek1017/kernel-policy.json') as f:
+    policy=json.load(f)
+data=collect(policy)
+data['policy_sha256']=hashlib.sha256(json.dumps(policy,sort_keys=True).encode()).hexdigest()
+print(json.dumps(data))

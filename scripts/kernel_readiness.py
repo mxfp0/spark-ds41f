@@ -54,6 +54,11 @@ def key_enrolled(returncode, output):
     return returncode in (0, 1) and output.strip().endswith(" is already enrolled")
 
 
+def required_modules(policy):
+    modules = ["nvidia", "nvidia_uvm", "nvidia_drm", "mlx5_core", "mlx5_ib"]
+    return modules + (["dgx_ec_fan_control"] if policy.get("fan_control", True) else [])
+
+
 def collect(policy):
     target = policy["candidate"]
     data = {"kernel": os.uname().release, "page_size": os.sysconf("SC_PAGE_SIZE"),
@@ -91,12 +96,13 @@ def collect(policy):
     data["governors"] = sorted({p.read_text().strip() for p in Path("/sys/devices/system/cpu/cpufreq").glob("policy*/scaling_governor")})
     config = Path(f"/boot/config-{target}")
     data["config_64k"] = config.exists() and "CONFIG_ARM64_64K_PAGES=y" in config.read_text()
-    for module in ("nvidia", "nvidia_uvm", "nvidia_drm", "mlx5_core", "mlx5_ib", "dgx_ec_fan_control"):
+    for module in required_modules(policy):
         data["modules"][module] = {
-            "vermagic": read(module, "modinfo", "-k", target, "-F", "vermagic", module),
-            "version": read(module, "modinfo", "-k", target, "-F", "version", module),
+            field: read(module, "modinfo", "-k", target, "-F", field, module)
+            for field in ("filename", "vermagic", "version", "srcversion", "signer")
         }
-    data["fan_dkms"] = read("fan DKMS", "dkms", "status", "-m", "dgx-spark-fan-control", "-k", target)
+    if policy.get("fan_control", True):
+        data["fan_dkms"] = read("fan DKMS", "dkms", "status", "-m", "dgx-spark-fan-control", "-k", target)
     if policy.get("memory_saver"):
         saver = policy["memory_saver"]
         data["memory_saver_dkms"] = read("memory-saver DKMS", "dkms", "status",
@@ -107,8 +113,9 @@ def collect(policy):
             for field in ("filename", "srcversion", "signer")
         }
     data["secure_boot"] = read("Secure Boot", "mokutil", "--sb-state")
-    data["fan_signer"] = read("fan signature", "modinfo", "-k", target, "-F", "signer", "dgx_ec_fan_control")
-    if data["secure_boot"] == "SecureBoot enabled":
+    if policy.get("fan_control", True):
+        data["fan_signer"] = read("fan signature", "modinfo", "-k", target, "-F", "signer", "dgx_ec_fan_control")
+    if policy.get("fan_control", True) and data["secure_boot"] == "SecureBoot enabled":
         result = subprocess.run(["mokutil", "--test-key", policy["fan_signing_certificate"]],
                                 capture_output=True, text=True, timeout=20,
                                 env=dict(os.environ, LC_ALL="C"))
@@ -163,16 +170,16 @@ def findings(name, data, policy):
     if data.get("governors") != ["performance"]:
         issues.append(f"{name}: CPU governors differ from performance: {data.get('governors')!r}")
         fixes.append(f"{name}: after installing matching linux-tools, sudo systemctl restart nv-cpu-governor.service")
-    for module in ("nvidia", "nvidia_uvm", "nvidia_drm", "mlx5_core", "mlx5_ib", "dgx_ec_fan_control"):
+    for module in required_modules(policy):
         info = data.get("modules", {}).get(module, {})
         if info.get("vermagic", "").split()[:1] != [target]:
             issues.append(f"{name}: {module} is not prepared for {target}")
         if module.startswith("nvidia") and info.get("version") != policy["driver"]:
             issues.append(f"{name}: candidate {module} driver version differs from {policy['driver']}")
-    if "installed" not in data.get("fan_dkms", ""):
+    if policy.get("fan_control", True) and "installed" not in data.get("fan_dkms", ""):
         issues.append(f"{name}: fan-control DKMS is not installed for {target}")
         fixes.append(f"{name}: sudo dkms autoinstall -k {target}")
-    if data.get("secure_boot") == "SecureBoot enabled" and (not data.get("fan_signer") or not data.get("fan_key_enrolled")):
+    if policy.get("fan_control", True) and data.get("secure_boot") == "SecureBoot enabled" and (not data.get("fan_signer") or not data.get("fan_key_enrolled")):
         issues.append(f"{name}: Secure Boot is enabled but the candidate fan signature/enrolled key is unverified")
     grub = data.get("grub", {})
     if target not in grub.get("entries", {}).values():
@@ -234,6 +241,19 @@ def profile_problems(name, data, profile, policy):
     if data.get("kernel") != profile["release"] or data.get("page_size") != profile["page_size"]:
         issues.append(f"{name}: serving profile requires {profile['release']} / {profile['page_size']}-byte pages; "
                       f"running {data.get('kernel')!r} / {data.get('page_size')!r}")
+    if data.get("driver") != policy["driver"]:
+        issues.append(f"{name}: serving profile requires NVIDIA {policy['driver']}")
+    if policy.get("stock_uvm_required"):
+        for module in ("nvidia", "nvidia_uvm"):
+            info = data.get("modules", {}).get(module, {})
+            if "/kernel/nvidia-580-open/" not in info.get("filename", ""):
+                issues.append(f"{name}: {module} must use the packaged stock module")
+            if data.get("loaded_nvidia_sources", {}).get(module) != info.get("srcversion") or not info.get("srcversion"):
+                issues.append(f"{name}: loaded {module} differs from the packaged module")
+            if data.get("secure_boot") == "SecureBoot enabled" and not info.get("signer"):
+                issues.append(f"{name}: packaged {module} has no Secure Boot signer")
+        if data.get("uvm_leaf_packing") != "stock":
+            issues.append(f"{name}: stock UVM profile must not load Memory Saver")
     if policy.get("rm_build_note") and data.get("rm_build_note") != policy["rm_build_note"]:
         issues.append(f"{name}: serving profile requires the qualified NVIDIA RM build")
     if policy.get("rm_system_memory_pools") is not None and data.get("rm_system_memory_pools") != str(policy["rm_system_memory_pools"]):
@@ -243,8 +263,6 @@ def profile_problems(name, data, profile, policy):
             issues.append(f"{name}: serving profile requires a pinned memory-saver policy")
         else:
             issues.extend(memory_saver_problems(name, data, policy))
-        if data.get("driver") != policy["driver"]:
-            issues.append(f"{name}: serving profile requires NVIDIA {policy['driver']}")
     return issues
 
 

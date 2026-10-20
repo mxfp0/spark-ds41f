@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "status": "site-qualified-baseline",
+  "captured_at": "2026-10-18T03:45:31.148363+00:00",
+  "scope": "Five uncached32K source requests and five256-token hash-map prose requests, basic APIs/rates; not full upstream suite",
+  "measured_deployment_commit": "8d004a9f0ce6d6db4661a0aad51f0f6040a81598",
+  "upstream_recipe_commit": "2e2c36f09c9d0432a1f9f5b79aa18014254b43d5",
+  "shape": "tp4-ring",
+  "nodes": [
+    "spark1",
+    "spark2",
+    "spark3",
+    "spark4"
+  ],
+  "profile": "config/sparks.json",
+  "profile_sha256": "5df8fa238088cc84e69280655b552188a68a98ade3ef221424678732bf48a65b",
+  "image_id": "sha256:4d7f78c58378c22b1dec410cc7afae960facad44079b28e9af2ab95620b56477",
+  "checkpoint": {
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "full_checkpoint_only_on": "spark3",
+    "nfs_use": "initial checkpoint loading and preparation only",
+    "runtime_engram": "local ext4 O_DIRECT files on all4"
+  },
+  "nccl": {
+    "upstream_revision": "73cf112295c33aee2b895f329f592f2a9b4b0f97",
+    "patched_source_revision": "8ebd7f5f8e8c92d8197b8f651cf5313ebbc2af71",
+    "library_sha256": "1bfbeb23d3ed1383fe8c77d91c12444d9dd51731b6dba29d63dcfe4e6b0a3ade",
+    "patch_series": "experiments/2026-10-18-subnet-fusion/series",
+    "p2p_channels_per_peer": 2,
+    "actual_members_local_remote_qps": [
+      2,
+      2,
+      2
+    ],
+    "one_shot_peer_map": "unchanged, one primary HCA per cable"
+  },
+  "configured": {
+    "context": 1048576,
+    "concurrency": 16,
+    "kv_gib_per_rank": 10.5,
+    "shared_logical_kv_tokens": 8580566,
+    "dspark_block": 5,
+    "memory_saver": false,
+    "page_size": 65536
+  },
+  "thresholds": {
+    "source32k_median_floor_tps": 5682.9,
+    "prose_median_floor_tps": 70
+  },
+  "results": {
+    "source-32768": {
+      "n": 5,
+      "median_tps": 5760.108381690698,
+      "range_tps": [
+        5700.966096493511,
+        5792.986054710676
+      ],
+      "errors": 0,
+      "cached_tokens_zero": true,
+      "expected_capped_completions": true
+    },
+    "prose": {
+      "n": 5,
+      "median_tps": 81.63044820942204,
+      "range_tps": [
+        81.36495972597476,
+        81.7732567803488
+      ],
+      "errors": 0,
+      "cached_tokens_zero": true,
+      "expected_capped_completions": true
+    }
+  },
+  "all10_isolated": true,
+  "nfs_read_rpc_deltas_all4": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "all4_runtime_library_channel_pair_and_payload_proved": true,
+  "zero_rdma_errors_drops_oom_restarts": true,
+  "basic_apis": [
+    "arithmetic",
+    "automatic tools and continuation",
+    "vision",
+    "reasoning"
+  ],
+  "dashboard_numeric_rows": [
+    26799,
+    26798
+  ],
+  "sparkdash_screen": {
+    "repeats_per_size": 1,
+    "cases": [
+      {
+        "case": "sparkdash-4096",
+        "prompt_tokens": 4101,
+        "client_prefill_tps": 5320.680846832147,
+        "ttft_s": 0.770766019999428
+      },
+      {
+        "case": "sparkdash-8192",
+        "prompt_tokens": 8197,
+        "client_prefill_tps": 5698.196970978922,
+        "ttft_s": 1.438525211000524
+      },
+      {
+        "case": "sparkdash-16384",
+        "prompt_tokens": 16389,
+        "client_prefill_tps": 6013.885664596469,
+        "ttft_s": 2.7251931470000272
+      },
+      {
+        "case": "sparkdash-32768",
+        "prompt_tokens": 32773,
+        "client_prefill_tps": 6223.764039642964,
+        "ttft_s": 5.265784465999786
+      }
+    ]
+  },
+  "evidence": {
+    "site_summary": "experiments/2026-10-18-paired-p2p/serving-result.json",
+    "runtime_file_hashes": "experiments/2026-10-18-paired-p2p/runtime-files.json",
+    "raw_artifacts": "/home/spark/ai/deepseek1017-vllm-tp4/performance-replication",
+    "decision_log": "/home/spark/ai/deepseek1017-vllm-tp4/decisions.tsv"
+  },
+  "limits": [
+    "Memory Saver deferred",
+    "Not the full upstream prefill or100-prompt prose suite",
+    "No near1M, sustained16-stream or full output-cap qualification",
+    "No broad model-quality parity claim"
+  ],
+  "rollback": "Keep local Engram; use signed0c2d426 paired-P2P1 or fa4aeef local-only with its original node map/library together. Never restore runtime-NFS."
+}

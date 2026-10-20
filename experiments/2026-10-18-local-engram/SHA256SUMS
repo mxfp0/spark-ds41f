@@ -1,0 +1,4 @@
+bc97085e3eb64aca354877ba42fcfcffc88eb6612c8bd297ccf3bf8c4f3b8817  experiments/2026-10-18-local-engram/local_engram.py
+d8ca408aebe76a3b623a7fdc77911f89facd519b6901540acdf8ccb2edff343f  experiments/2026-10-18-local-engram/local-plan.json
+d768c401072dc77842440de26d67e32032e90ae922e4a07a5b248373ff37cca3  experiments/2026-10-18-local-engram/overlay/rows.py
+27c379d4faf886c891bb2071e4374bab32bc1dd1f9f720798fb9fd661f05f42f  site/check-local-engram.py

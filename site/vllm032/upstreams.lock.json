@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "generated_from_baseline": "upstream-vllm032-local",
+  "source_manifest": "site/vllm032/sources.json",
+  "sources": {
+    "vllm": {
+      "kind": "git",
+      "upstream": "https://github.com/vllm-project/vllm.git",
+      "tracking_ref": "refs/tags/v0.32.0",
+      "revision": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+      "patch_series": "site/vllm032/series",
+      "role": "Official vLLM0.32 with the qualified native V4.1 kernel family and site storage/communication adaptations",
+      "runtime_from_base_image": true
+    },
+    "vllm_base_image": {
+      "kind": "oci",
+      "upstream": "docker.io/vllm/vllm-openai",
+      "tag": "v0.32.0",
+      "recorded_base_digest": "sha256:6ff5ff0ddf3658d2c2d677dac5ca2d4726ce0156b4371166d918181b210bd4bc",
+      "source_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be"
+    },
+    "tilelang": {
+      "kind": "git",
+      "upstream": "https://github.com/tile-ai/tilelang.git",
+      "contribution_remote": "https://github.com/christopherowen/tilelang.git",
+      "tracking_ref": "refs/heads/main",
+      "revision": "b95ee4ffb52ae26e15619cad38c6f41e7e0a2b46",
+      "revision_url": "https://github.com/tile-ai/tilelang/commit/b95ee4ffb52ae26e15619cad38c6f41e7e0a2b46",
+      "version": "0.1.15",
+      "submodules": true,
+      "role": "TileLang 0.1.15 compiler for the TileLang kernel backend, built from source with SM120-family block-scaled MMA patches; replaces the base image's tilelang 0.1.12",
+      "patch_series": "experiments/2026-10-17-r6u/tilelang/series"
+    },
+    "tile_kernels": {
+      "kind": "git",
+      "upstream": "https://github.com/deepseek-ai/TileKernels.git",
+      "contribution_remote": null,
+      "tracking_ref": "refs/heads/main",
+      "revision": "66258df6175d2f630ffecb04c5ab66bff8a2ae6a",
+      "revision_url": "https://github.com/deepseek-ai/TileKernels/commit/66258df6175d2f630ffecb04c5ab66bff8a2ae6a",
+      "version": "2.0.0",
+      "role": "DeepSeek's TileLang kernels (pure Python, release 2.0.0) for the TileLang kernel backend, with patches/tile_kernels (the routed SwiGLU clamp keeps a NaN)",
+      "patch_series": "patches/tile_kernels/series"
+    },
+    "sparknet": {
+      "kind": "git",
+      "upstream": "https://github.com/christopherowen/dgx-spark-networking.git",
+      "contribution_remote": null,
+      "tracking_ref": "refs/heads/timeout-stop",
+      "revision": "3bc8d10104a5012244a0424d7dfc1107a72eafab",
+      "revision_url": "https://github.com/christopherowen/dgx-spark-networking/commit/3bc8d10104a5012244a0424d7dfc1107a72eafab",
+      "version": "0.3.0",
+      "role": "sparknet: one-shot RoCE collectives (TileLang kernels only, timed waits that stop the GPU, API 2) and fabric profiles, for the TileLang family's TP collectives; branch timeout-stop on tilelang-only, qualified on the TP4 fleet with r6n (2026-10-15)"
+    }
+  }
+}

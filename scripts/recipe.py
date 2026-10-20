@@ -192,15 +192,19 @@ def is_overlay(cluster: dict) -> bool:
 
 def overlay(arm: dict, base: dict) -> dict:
     """An experiment arm: ``base`` (the recipe at a shape, or another arm, already
-    resolved) with ``set`` merged in and the dotted paths of ``unset`` removed.
+    resolved) with ``set`` merged in, dotted ``unset`` paths removed, and optional
+    ``append_serve_args`` added to the serving command.
 
     An arm is not production: it carries neither the recipe's shape nor its
     qualifying benchmark, so starting it needs no qualification and a bench names
     its own reference.
     """
-    unknown = set(arm) - {"extends", "set", "unset", "notes"}
+    unknown = set(arm) - {"extends", "set", "unset", "notes", "append_serve_args"}
     if unknown:
-        raise SystemExit(f"an arm overlay holds extends, set, unset and notes; not {', '.join(sorted(unknown))}")
+        raise SystemExit(f"an arm overlay holds extends, set, unset, notes and append_serve_args; not {', '.join(sorted(unknown))}")
+    extra = arm.get("append_serve_args", [])
+    if not isinstance(extra, list) or any(not isinstance(arg, str) for arg in extra):
+        raise SystemExit("append_serve_args must be a list of strings")
     cluster = _merge(base, arm.get("set", {}))
     sets = arm.get("set", {})
     if "models" in cluster and ("model" in sets or "mounts" in sets.get("container", {})):
@@ -223,6 +227,8 @@ def overlay(arm: dict, base: dict) -> dict:
             node = node.get(part, {}) if isinstance(node, dict) else {}
         else:
             raise SystemExit(f"the arm unsets {dotted}, which its base does not set")
+    if extra:
+        cluster["serve_args"].extend(extra)
     return cluster
 
 

@@ -1,0 +1,811 @@
+From c3d9bf203c2eaeb20c803406cc541c83cb7db796 Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:33:46 +0200
+Subject: [PATCH 1/7] Add verified local disk Engram storage
+
+---
+ vllm/config/engram.py                       |  7 +++++++
+ vllm/models/deepseek_v41/common/engram.py   | 17 ++++++++++++++---
+ vllm/models/deepseek_v41/nvidia/model.py    | 13 +++++++++++++
+ vllm/models/deepseek_v41/nvidia/vl_model.py |  4 ++++
+ 4 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/config/engram.py b/vllm/config/engram.py
+index 7a7ed8f..78a9834 100644
+--- a/vllm/config/engram.py
++++ b/vllm/config/engram.py
+@@ -34,6 +34,9 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
+ class EngramConfig:
+     """Configuration for Engram embedding storage and sharding."""
+ 
++    disk_offload: bool = False
++    """Read verified local Engram rows on demand. Requires eager execution."""
++
+     cpu_offload: bool = True
+     """Store embedding weights in pinned CPU memory for UVA lookup."""
+ 
+@@ -56,6 +59,8 @@ class EngramConfig:
+ 
+     @model_validator(mode="after")
+     def _validate_shared_memory(self) -> Self:
++        if self.disk_offload and (self.cpu_offload or self.dp_shared_memory or self.use_thp):
++            raise ValueError("disk_offload requires CPU offload, shared memory and THP disabled")
+         if self.dp_shared_memory and not self.cpu_offload:
+             raise ValueError("dp_shared_memory requires cpu_offload=True")
+         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
+@@ -92,6 +97,8 @@ class EngramConfig:
+             )
+ 
+     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
++        if self.disk_offload and (parallel_config.tensor_parallel_size != 4 or parallel_config.data_parallel_size != 1):
++            raise ValueError("Disk Engram requires TP4/DP1")
+         """Reject unsupported embedding parallel topologies."""
+         if self.dp_shared_memory:
+             if parallel_config.data_parallel_size <= 1:
+diff --git a/vllm/models/deepseek_v41/common/engram.py b/vllm/models/deepseek_v41/common/engram.py
+index 236235d..85a1509 100644
+--- a/vllm/models/deepseek_v41/common/engram.py
++++ b/vllm/models/deepseek_v41/common/engram.py
+@@ -1163,6 +1163,9 @@ class ParallelEngramEmbedding(nn.Module):
+             OUT_STRIDE=out.stride(0),
+         )
+ 
++    def restore_head_order(self, rows: torch.Tensor) -> torch.Tensor:
++        return rows
++
+     def forward(self, indices: torch.Tensor) -> torch.Tensor:
+         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
+         bf16, gathered from all shards for this replica's tokens."""
+@@ -1179,7 +1182,7 @@ class ParallelEngramEmbedding(nn.Module):
+             out = _gather_engram_rows(out, num_tokens)
+         if self.tp_size > 1:
+             out = tensor_model_parallel_all_gather(out, dim=1)
+-        return out[:, : self.n_hash_cols]
++        return self.restore_head_order(out[:, : self.n_hash_cols])
+ 
+ 
+ @triton.jit(do_not_specialize=["num_kv_tokens"])
+@@ -1579,6 +1582,14 @@ class Engram(nn.Module):
+     ) -> ParallelEngramEmbedding:
+         engram_config = get_current_vllm_config().engram_config
+         assert engram_config is not None
++        if engram_config.disk_offload:
++            from vllm032.embedding import DiskEmbedding
++
++            return DiskEmbedding(
++                layout.num_embeddings[layer_hash_index], layout.head_dim,
++                tuple(size for order in layout.primes[layer_hash_index] for size in order),
++                get_current_vllm_config().scheduler_config.max_num_batched_tokens,
++            )
+         return ParallelEngramEmbedding(
+             layout.num_embeddings[layer_hash_index],
+             layout.head_dim,
+@@ -1669,9 +1680,9 @@ class Engram(nn.Module):
+                 get_tensor_model_parallel_rank() * chunk,
+                 local_heads * dim,
+             )
+-            return out
++            return self.embed_tokens.restore_head_order(out)
+         rows = tensor_model_parallel_all_gather(rows, dim=1)
+-        return rows[:, : self.embed_tokens.n_hash_cols]
++        return self.embed_tokens.restore_head_order(rows[:, : self.embed_tokens.n_hash_cols])
+ 
+     def forward(
+         self,
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+index 8ec0155..82a7b40 100644
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1659,7 +1659,20 @@ class DeepseekV41LLMForCausalLM(
+         forward(); valid after each target step."""
+         return getattr(self.model, "_mtp_hidden_buffer", None)
+ 
++    def is_unused_checkpoint_weight(self, name: str) -> bool:
++        config = self.model.vllm_config.engram_config
++        return bool(config and config.disk_offload and any(
++            name in (
++                f"layers.{layer}.engram.embed.weight",
++                f"layers.{layer}.engram.embed.scale",
++                f"model.layers.{layer}.engram.embed_tokens.weight",
++                f"model.layers.{layer}.engram.embed_tokens.weight_scale_inv",
++            )
++            for layer in self.model.config.engram_layer_ids
++        ))
++
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
++        weights = ((name, value) for name, value in weights if not self.is_unused_checkpoint_weight(name))
+         loader = AutoWeightsLoader(self)
+         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+         self.process_weights_after_loading()
+diff --git a/vllm/models/deepseek_v41/nvidia/vl_model.py b/vllm/models/deepseek_v41/nvidia/vl_model.py
+index d677534..968b432 100644
+--- a/vllm/models/deepseek_v41/nvidia/vl_model.py
++++ b/vllm/models/deepseek_v41/nvidia/vl_model.py
+@@ -316,7 +316,11 @@ class DeepseekV41ForCausalLM(
+         """Pre-hc_head residual stream buffer for the MTP/DSpark draft model."""
+         return self.language_model.get_mtp_target_hidden_states()
+ 
++    def is_unused_checkpoint_weight(self, name: str) -> bool:
++        return self.language_model.is_unused_checkpoint_weight(name)
++
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
++        weights = ((name, value) for name, value in weights if not self.is_unused_checkpoint_weight(name))
+         # Map HF names into this wrapper's namespace up front and sort, so
+         # the "language_model." group reaches the child loader as one
+         # contiguous block (AutoWeightsLoader delegates per contiguous group,
+-- 
+2.43.0
+
+
+From fb693df052d54bde6ee1d73ca9b42536137926ab Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:44:52 +0200
+Subject: [PATCH 2/7] Skip disk Engram tensors before lazy materialization
+
+
+---
+ vllm/config/engram.py                              |  2 +-
+ vllm/config/vllm.py                                | 12 ++++++++++++
+ vllm/model_executor/model_loader/default_loader.py |  1 +
+ vllm/model_executor/model_loader/weight_utils.py   |  9 +++++++--
+ 4 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/config/engram.py b/vllm/config/engram.py
+index 78a9834..ab19d01 100644
+--- a/vllm/config/engram.py
++++ b/vllm/config/engram.py
+@@ -97,9 +97,9 @@ class EngramConfig:
+             )
+ 
+     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
++        """Reject unsupported embedding parallel topologies."""
+         if self.disk_offload and (parallel_config.tensor_parallel_size != 4 or parallel_config.data_parallel_size != 1):
+             raise ValueError("Disk Engram requires TP4/DP1")
+-        """Reject unsupported embedding parallel topologies."""
+         if self.dp_shared_memory:
+             if parallel_config.data_parallel_size <= 1:
+                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index f27c841..835b8fb 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -1406,6 +1406,18 @@ class VllmConfig:
+             if not model_has_engram_layers(model_config):
+                 return
+             self.engram_config = EngramConfig()
++        if self.engram_config.disk_offload:
++            if (
++                self.load_config.load_format != "safetensors"
++                or self.load_config.safetensors_load_strategy != "lazy"
++                or self.load_config.model_loader_extra_config.get("enable_multithread_load")
++                or model_config is None
++                or not model_config.enforce_eager
++            ):
++                raise ValueError(
++                    "Disk Engram requires eager execution and single-threaded "
++                    "lazy safetensors loading"
++                )
+         self.engram_config.verify_model_config(model_config)
+         self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+         self.engram_config.verify_parallel_config(self.parallel_config)
+diff --git a/vllm/model_executor/model_loader/default_loader.py b/vllm/model_executor/model_loader/default_loader.py
+index 07283e5..bab9346 100644
+--- a/vllm/model_executor/model_loader/default_loader.py
++++ b/vllm/model_executor/model_loader/default_loader.py
+@@ -335,6 +335,7 @@ class DefaultModelLoader(BaseModelLoader):
+                         self.load_config.use_tqdm_on_load,
+                         self.load_config.safetensors_load_strategy,
+                         local_expert_ids=self.local_expert_ids,
++                        is_unused_weight=source.is_unused_weight,
+                         safetensors_prefetch_num_threads=(
+                             self.load_config.safetensors_prefetch_num_threads
+                         ),
+diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
+index feffff8..3f958c5 100644
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -1082,6 +1082,7 @@ def safetensors_weights_iterator(
+     safetensors_load_strategy: str | None = None,
+     local_expert_ids: set[int] | None = None,
+     *,
++    is_unused_weight: Callable[[str], bool] | None = None,
+     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+ ) -> Generator[tuple[str, torch.Tensor], None, None]:
+@@ -1189,7 +1190,9 @@ def safetensors_weights_iterator(
+             with safe_open(st_file, framework="pt") as f:
+                 state_dict = {}
+                 for name in f.keys():  # noqa: SIM118
+-                    if should_skip_weight(name, local_expert_ids):
++                    if (
++                        is_unused_weight is not None and is_unused_weight(name)
++                    ) or should_skip_weight(name, local_expert_ids):
+                         continue
+                     state_dict[name] = f.get_tensor(name)
+ 
+@@ -1207,7 +1210,9 @@ def safetensors_weights_iterator(
+         else:
+             with safe_open(st_file, framework="pt") as f:
+                 for name in f.keys():  # noqa: SIM118
+-                    if should_skip_weight(name, local_expert_ids):
++                    if (
++                        is_unused_weight is not None and is_unused_weight(name)
++                    ) or should_skip_weight(name, local_expert_ids):
+                         continue
+                     param = f.get_tensor(name)
+                     yield name, param
+-- 
+2.43.0
+
+
+From 3cada3d84b06468473d68a3024d2fa7003b58e80 Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:53:43 +0200
+Subject: [PATCH 3/7] Allow disk Engram with guarded breakable graphs
+
+
+---
+ vllm/config/engram.py |  2 +-
+ vllm/config/vllm.py   | 17 ++++++++++++++---
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/vllm/config/engram.py b/vllm/config/engram.py
+index ab19d01..bf6dac1 100644
+--- a/vllm/config/engram.py
++++ b/vllm/config/engram.py
+@@ -35,7 +35,7 @@ class EngramConfig:
+     """Configuration for Engram embedding storage and sharding."""
+ 
+     disk_offload: bool = False
+-    """Read verified local Engram rows on demand. Requires eager execution."""
++    """Read verified local Engram rows with eager or breakable execution."""
+ 
+     cpu_offload: bool = True
+     """Store embedding weights in pinned CPU memory for UVA lookup."""
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index 835b8fb..890f336 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -1412,12 +1412,23 @@ class VllmConfig:
+                 or self.load_config.safetensors_load_strategy != "lazy"
+                 or self.load_config.model_loader_extra_config.get("enable_multithread_load")
+                 or model_config is None
+-                or not model_config.enforce_eager
+             ):
+                 raise ValueError(
+-                    "Disk Engram requires eager execution and single-threaded "
+-                    "lazy safetensors loading"
++                    "Disk Engram requires single-threaded lazy safetensors loading"
+                 )
++            if not model_config.enforce_eager:
++                compilation = self.compilation_config
++                if (
++                    compilation.mode != CompilationMode.NONE
++                    or compilation.cudagraph_mode != CUDAGraphMode.PIECEWISE
++                    or compilation.cudagraph_decoder_replay
++                    or not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
++                    or not self.use_v2_model_runner
++                ):
++                    raise ValueError(
++                        "Disk Engram requires eager execution or V2 breakable "
++                        "PIECEWISE graphs without compilation or decoder replay"
++                    )
+         self.engram_config.verify_model_config(model_config)
+         self.engram_config.resolve_dp_shared_memory(self.parallel_config)
+         self.engram_config.verify_parallel_config(self.parallel_config)
+-- 
+2.43.0
+
+
+From 7ab2443d24ba140e0874c19f5b49b6146eea0fa5 Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:58:50 +0200
+Subject: [PATCH 4/7] Prepare canonical B12X MXFP8 MoE plans
+
+Skip target weights when loading the shared-checkpoint DSpark model.
+
+
+---
+ vllm/config/engram.py                        | 13 +++--
+ vllm/config/vllm.py                          |  4 +-
+ vllm/model_executor/layers/fused_moe/b12x.py | 52 +++++++++++++++++++-
+ vllm/models/deepseek_v41/common/engram.py    | 11 +++--
+ vllm/models/deepseek_v41/nvidia/dspark.py    |  3 ++
+ vllm/models/deepseek_v41/nvidia/model.py     | 27 ++++++----
+ vllm/models/deepseek_v41/nvidia/vl_model.py  |  6 ++-
+ 7 files changed, 97 insertions(+), 19 deletions(-)
+
+diff --git a/vllm/config/engram.py b/vllm/config/engram.py
+index bf6dac1..a0df3d8 100644
+--- a/vllm/config/engram.py
++++ b/vllm/config/engram.py
+@@ -59,8 +59,12 @@ class EngramConfig:
+ 
+     @model_validator(mode="after")
+     def _validate_shared_memory(self) -> Self:
+-        if self.disk_offload and (self.cpu_offload or self.dp_shared_memory or self.use_thp):
+-            raise ValueError("disk_offload requires CPU offload, shared memory and THP disabled")
++        if self.disk_offload and (
++            self.cpu_offload or self.dp_shared_memory or self.use_thp
++        ):
++            raise ValueError(
++                "disk_offload requires CPU offload, shared memory and THP disabled"
++            )
+         if self.dp_shared_memory and not self.cpu_offload:
+             raise ValueError("dp_shared_memory requires cpu_offload=True")
+         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
+@@ -98,7 +102,10 @@ class EngramConfig:
+ 
+     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
+         """Reject unsupported embedding parallel topologies."""
+-        if self.disk_offload and (parallel_config.tensor_parallel_size != 4 or parallel_config.data_parallel_size != 1):
++        if self.disk_offload and (
++            parallel_config.tensor_parallel_size != 4
++            or parallel_config.data_parallel_size != 1
++        ):
+             raise ValueError("Disk Engram requires TP4/DP1")
+         if self.dp_shared_memory:
+             if parallel_config.data_parallel_size <= 1:
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index 890f336..fcb237c 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -1410,7 +1410,9 @@ class VllmConfig:
+             if (
+                 self.load_config.load_format != "safetensors"
+                 or self.load_config.safetensors_load_strategy != "lazy"
+-                or self.load_config.model_loader_extra_config.get("enable_multithread_load")
++                or self.load_config.model_loader_extra_config.get(
++                    "enable_multithread_load"
++                )
+                 or model_config is None
+             ):
+                 raise ValueError(
+diff --git a/vllm/model_executor/layers/fused_moe/b12x.py b/vllm/model_executor/layers/fused_moe/b12x.py
+index 6ba4d24..9a06198 100644
+--- a/vllm/model_executor/layers/fused_moe/b12x.py
++++ b/vllm/model_executor/layers/fused_moe/b12x.py
+@@ -3,6 +3,7 @@
+ """b12x modular tensor-parallel fused MoE backend."""
+ 
+ from collections.abc import Iterable
++from dataclasses import dataclass
+ from typing import Any
+ 
+ import torch
+@@ -35,6 +36,16 @@ from vllm.utils.b12x import (
+ 
+ logger = init_logger(__name__)
+ 
++
++@dataclass(frozen=True)
++class _CanonicalMoEPlan:
++    declaration: Any
++    experts: Any
++
++    def scratch_specs(self):
++        return self.declaration.memory_requirements().scratch
++
++
+ _B12X_MOE_MODES: dict[
+     tuple[torch.dtype | str | None, torch.dtype | str | None],
+     tuple[str, str, str],
+@@ -112,10 +123,10 @@ def _run_b12x_moe_plan(
+     fused_moe = _require_b12x_fused_moe()
+ 
+     binding = fused_moe.bind(
+-        plan,
++        plan.declaration if isinstance(plan, _CanonicalMoEPlan) else plan,
+         scratch=scratch,
+         a=hidden_states,
+-        experts=prepared,
++        experts=plan.experts if isinstance(plan, _CanonicalMoEPlan) else prepared,
+         topk_weights=topk_weights,
+         topk_ids=topk_ids,
+         output=output,
+@@ -601,6 +612,41 @@ class B12xExperts(mk.FusedMoEExpertsModular):
+ 
+         limit, alpha, beta = self._swiglu_params(activation)
+         prepared = self._prepared()
++        if self._quant_mode == "w4a8_mx":
++            if (
++                activation != MoEActivation.SILU
++                or alpha is not None
++                or beta is not None
++            ):
++                raise ValueError(
++                    "Canonical W4A8 bridge requires SiLU with default alpha and beta"
++                )
++            canonical_weights = fused_moe.plan_weights(
++                source=fused_moe.PackedSource(
++                    format=fused_moe.PackedSourceFormat.MXFP4_E8M0_K32,
++                    w13_layout=fused_moe.W13Layout(self._w13_layout),
++                ),
++                activation=fused_moe.ActivationSpec(
++                    mode=fused_moe.ActivationMode.A8,
++                    nonlinearity=_b12x_activation_name(activation),
++                    io_dtype=self.moe_config.in_dtype,
++                    swiglu_limit=limit,
++                ),
++                geometry=fused_moe.MoEGeometry(
++                    num_experts=int(prepared.num_experts),
++                    hidden_size=int(prepared.hidden_size),
++                    intermediate_size=int(prepared.intermediate_size),
++                ),
++            )
++            experts = fused_moe.PreparedExperts(plan=canonical_weights, _impl=prepared)
++            declaration = fused_moe.plan_execution(
++                experts=experts,
++                capacity=fused_moe.ExecutionCapacity(max_tokens=key[0], top_k=key[1]),
++                routing=fused_moe.RoutingSpec(apply_router_weight_on_input=key[3]),
++            )
++            plan = _CanonicalMoEPlan(declaration, experts)
++            self._plans[key] = plan
++            return plan
+         plan = fused_moe.plan(
+             fused_moe.Caps(
+                 max_tokens=key[0],
+@@ -684,6 +730,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
+                 swiglu_beta=beta,
+             )
+             signature = (execution_plan.implementation, execution_plan.execution)
++            if self._quant_mode == "w4a8_mx":
++                signature += (tokens,)
+             launch_tokens.setdefault(signature, tokens)
+ 
+         for tokens in launch_tokens.values():
+diff --git a/vllm/models/deepseek_v41/common/engram.py b/vllm/models/deepseek_v41/common/engram.py
+index 85a1509..13a3c06 100644
+--- a/vllm/models/deepseek_v41/common/engram.py
++++ b/vllm/models/deepseek_v41/common/engram.py
+@@ -1586,8 +1586,11 @@ class Engram(nn.Module):
+             from vllm032.embedding import DiskEmbedding
+ 
+             return DiskEmbedding(
+-                layout.num_embeddings[layer_hash_index], layout.head_dim,
+-                tuple(size for order in layout.primes[layer_hash_index] for size in order),
++                layout.num_embeddings[layer_hash_index],
++                layout.head_dim,
++                tuple(
++                    size for order in layout.primes[layer_hash_index] for size in order
++                ),
+                 get_current_vllm_config().scheduler_config.max_num_batched_tokens,
+             )
+         return ParallelEngramEmbedding(
+@@ -1682,7 +1685,9 @@ class Engram(nn.Module):
+             )
+             return self.embed_tokens.restore_head_order(out)
+         rows = tensor_model_parallel_all_gather(rows, dim=1)
+-        return self.embed_tokens.restore_head_order(rows[:, : self.embed_tokens.n_hash_cols])
++        return self.embed_tokens.restore_head_order(
++            rows[:, : self.embed_tokens.n_hash_cols]
++        )
+ 
+     def forward(
+         self,
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index a09c315..ab0f788 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -366,6 +366,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+ 
+     # --- Weight loading ----------------------------------------------------
+ 
++    def is_unused_checkpoint_weight(self, name: str) -> bool:
++        return not name.startswith("mtp.")
++
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+         """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
+ 
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+index 82a7b40..8214a59 100644
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1661,18 +1661,27 @@ class DeepseekV41LLMForCausalLM(
+ 
+     def is_unused_checkpoint_weight(self, name: str) -> bool:
+         config = self.model.vllm_config.engram_config
+-        return bool(config and config.disk_offload and any(
+-            name in (
+-                f"layers.{layer}.engram.embed.weight",
+-                f"layers.{layer}.engram.embed.scale",
+-                f"model.layers.{layer}.engram.embed_tokens.weight",
+-                f"model.layers.{layer}.engram.embed_tokens.weight_scale_inv",
++        return bool(
++            config
++            and config.disk_offload
++            and any(
++                name
++                in (
++                    f"layers.{layer}.engram.embed.weight",
++                    f"layers.{layer}.engram.embed.scale",
++                    f"model.layers.{layer}.engram.embed_tokens.weight",
++                    f"model.layers.{layer}.engram.embed_tokens.weight_scale_inv",
++                )
++                for layer in self.model.config.engram_layer_ids
+             )
+-            for layer in self.model.config.engram_layer_ids
+-        ))
++        )
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+-        weights = ((name, value) for name, value in weights if not self.is_unused_checkpoint_weight(name))
++        weights = (
++            (name, value)
++            for name, value in weights
++            if not self.is_unused_checkpoint_weight(name)
++        )
+         loader = AutoWeightsLoader(self)
+         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+         self.process_weights_after_loading()
+diff --git a/vllm/models/deepseek_v41/nvidia/vl_model.py b/vllm/models/deepseek_v41/nvidia/vl_model.py
+index 968b432..91c83d3 100644
+--- a/vllm/models/deepseek_v41/nvidia/vl_model.py
++++ b/vllm/models/deepseek_v41/nvidia/vl_model.py
+@@ -320,7 +320,11 @@ class DeepseekV41ForCausalLM(
+         return self.language_model.is_unused_checkpoint_weight(name)
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+-        weights = ((name, value) for name, value in weights if not self.is_unused_checkpoint_weight(name))
++        weights = (
++            (name, value)
++            for name, value in weights
++            if not self.is_unused_checkpoint_weight(name)
++        )
+         # Map HF names into this wrapper's namespace up front and sort, so
+         # the "language_model." group reaches the child loader as one
+         # contiguous block (AutoWeightsLoader delegates per contiguous group,
+-- 
+2.43.0
+
+
+From 2c4329e050279b0f474b5600c72a2f4532d6adef Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 01:16:12 +0200
+Subject: [PATCH 5/7] Stage pageable checkpoint copies during loading
+
+
+---
+ vllm/model_executor/model_loader/default_loader.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/vllm/model_executor/model_loader/default_loader.py b/vllm/model_executor/model_loader/default_loader.py
+index bab9346..6f2e368 100644
+--- a/vllm/model_executor/model_loader/default_loader.py
++++ b/vllm/model_executor/model_loader/default_loader.py
+@@ -7,6 +7,7 @@ import glob
+ import os
+ import time
+ from collections.abc import Callable, Generator, Iterable
++from contextlib import AbstractContextManager, nullcontext
+ from typing import TYPE_CHECKING, cast
+ 
+ import torch
+@@ -496,7 +497,15 @@ class DefaultModelLoader(BaseModelLoader):
+         self._init_ep_weight_filter(model_config)
+         self._init_mm_encoder_only_weight_filter(model, model_config)
+ 
+-        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
++        copy_mode: AbstractContextManager = nullcontext()
++        if os.environ.get("SPARK_ANONYMOUS_WEIGHT_COPY") == "1":
++            from vllm032.weight_copy import AnonymousCheckpointCopy
++
++            copy_mode = AnonymousCheckpointCopy()
++        with copy_mode:
++            loaded_weights = model.load_weights(
++                self.get_all_weights(model_config, model)
++            )
+ 
+         self.counter_after_loading_weights = time.perf_counter()
+         logger.info_once(
+-- 
+2.43.0
+
+
+From 67274874eb57b746c306e5cdd2980ed404e3c5f1 Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 01:39:10 +0200
+Subject: [PATCH 6/7] Require FlashInfer runtime page sizes for SM120
+
+Adapt the startup check from vllm-project/vllm#57292 and pin FlashInfer 0.7.1.
+---
+ requirements/cuda.txt                         |  2 +-
+ .../test_flashinfer_sparse_mla_sm120_api.py   | 43 +++++++++++++++++++
+ .../deepseek_v41/nvidia/flashinfer_sparse.py  | 12 +++++-
+ vllm/utils/flashinfer.py                      | 13 ++++++
+ 4 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/requirements/cuda.txt b/requirements/cuda.txt
+index 3ac70a5..ae2152f 100644
+--- a/requirements/cuda.txt
++++ b/requirements/cuda.txt
+@@ -10,7 +10,7 @@ torchaudio==2.11.0
+ torchvision==0.28.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+ torchcodec >= 0.14
+ PyNvVideoCodec==2.0.4
+-flashinfer-python==0.7.0.post1
++flashinfer-python==0.7.1
+ apache-tvm-ffi==0.1.11
+ tilelang==0.1.12
+ nvidia-cudnn-frontend>=1.19.1
+diff --git a/tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py b/tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py
+index 724c887..760b98c 100644
+--- a/tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py
++++ b/tests/v1/attention/test_flashinfer_sparse_mla_sm120_api.py
+@@ -4,6 +4,7 @@
+ 
+ from types import SimpleNamespace
+ 
++import pytest
+ import torch
+ 
+ from vllm.config import set_current_vllm_config
+@@ -92,3 +93,45 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
+ 
+     assert _required_sm120_sparse_topk(causal, 128) == 128
+     assert _required_sm120_sparse_topk(dspark, 128) == 192
++
++
++@pytest.mark.parametrize(
++    ("configs", "expected"),
++    [
++        pytest.param(None, False, id="no-config-api"),
++        pytest.param({}, False, id="no-dsv4-entry"),
++        pytest.param(
++            {"dsv4": SimpleNamespace(page_block_size=64)}, False, id="fixed-64-pages"
++        ),
++        pytest.param(
++            {"dsv4": SimpleNamespace(page_block_size_is_runtime=False)},
++            False,
++            id="runtime-flag-off",
++        ),
++        pytest.param(
++            {"dsv4": SimpleNamespace(page_block_size_is_runtime=True)},
++            True,
++            id="runtime-pages",
++        ),
++    ],
++)
++def test_sm120_dsv4_runtime_page_size_probe(monkeypatch, configs, expected) -> None:
++    fake_module = SimpleNamespace()
++    if configs is not None:
++        fake_module.supported_sparse_mla_sm120_configs = lambda: configs
++    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
++    monkeypatch.setattr(fi_utils, "_get_submodule", lambda _name: fake_module)
++    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
++
++    assert fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size() is expected
++
++    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
++
++
++def test_sm120_dsv4_runtime_page_size_probe_needs_decode_api(monkeypatch) -> None:
++    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: False)
++    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
++
++    assert not fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size()
++
++    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
+diff --git a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+index a5ab092..be975ce 100644
+--- a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
++++ b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+@@ -627,8 +627,18 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
+ 
+     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
+         super().__init__(vllm_config, *args, **kwargs)
+-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
++        from vllm.utils.flashinfer import (
++            has_flashinfer_sparse_mla_sm120_config,
++            has_flashinfer_sparse_mla_sm120_runtime_page_size,
++        )
+ 
++        if not has_flashinfer_sparse_mla_sm120_runtime_page_size():
++            raise RuntimeError(
++                "FLASHINFER_MLA_SPARSE_DSV41 on SM120 requires FlashInfer >= 0.7.1 "
++                "(flashinfer-ai/flashinfer#5197). The installed build decodes "
++                "only 64-token pages, but DeepSeek-V4.1 uses smaller "
++                "compressed and SWA pages."
++            )
+         required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
+         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
+             raise RuntimeError(
+diff --git a/vllm/utils/flashinfer.py b/vllm/utils/flashinfer.py
+index 69401fe..c7021dd 100644
+--- a/vllm/utils/flashinfer.py
++++ b/vllm/utils/flashinfer.py
+@@ -473,6 +473,19 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
+     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+ 
+ 
++@functools.cache
++def has_flashinfer_sparse_mla_sm120_runtime_page_size() -> bool:
++    """Return whether FlashInfer's SM120 DSV4 decode takes runtime page sizes."""
++    if not has_flashinfer_sparse_mla_sm120():
++        return False
++    mod = _get_submodule("flashinfer.mla")
++    get_configs = getattr(mod, "supported_sparse_mla_sm120_configs", None)
++    if get_configs is None:
++        return False
++    config = get_configs().get("dsv4")
++    return bool(getattr(config, "page_block_size_is_runtime", False))
++
++
+ @functools.cache
+ def has_flashinfer_cutedsl() -> bool:
+     """Return ``True`` if FlashInfer cutedsl module is available."""
+-- 
+2.43.0
+
+
+From e1817e638e251690621ae7efaa935c74a0d0aeec Mon Sep 17 00:00:00 2001
+From: Herlon Aguiar <3419441+mxfp0@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 01:40:45 +0200
+Subject: [PATCH 7/7] Use 64-token indexer pages on SM120
+
+---
+ vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py | 3 ++-
+ vllm/models/deepseek_v41/sparse_mla.py               | 7 ++++++-
+ vllm/v1/attention/backends/mla/indexer.py            | 7 ++++++-
+ 3 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+index be975ce..7922bc1 100644
+--- a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
++++ b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+@@ -25,6 +25,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
+     DeepseekV4SparseMLAMetadataBuilder,
+     DeepseekV41SparseSWAMetadataBuilder,
+ )
++from vllm.platforms import current_platform
+ from vllm.platforms.interface import DeviceCapability
+ from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+ from vllm.v1.attention.backend import (
+@@ -115,7 +116,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
+ 
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+-        return [128]
++        return [64 if current_platform.is_device_capability_family(120) else 128]
+ 
+     @staticmethod
+     def get_name() -> str:
+diff --git a/vllm/models/deepseek_v41/sparse_mla.py b/vllm/models/deepseek_v41/sparse_mla.py
+index 1130eec..6c3f5cf 100644
+--- a/vllm/models/deepseek_v41/sparse_mla.py
++++ b/vllm/models/deepseek_v41/sparse_mla.py
+@@ -87,7 +87,12 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
+ 
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+-        return [64 if current_platform.is_device_capability_family(90) else 128]
++        return [
++            64
++            if current_platform.is_device_capability_family(90)
++            or current_platform.is_device_capability_family(120)
++            else 128
++        ]
+ 
+     @staticmethod
+     def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index 2d797ae..70b5610 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -369,7 +369,12 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+ 
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+-        return [64 if current_platform.is_device_capability_family(90) else 128]
++        return [
++            64
++            if current_platform.is_device_capability_family(90)
++            or current_platform.is_device_capability_family(120)
++            else 128
++        ]
+ 
+ 
+ @dataclass(frozen=True)
+-- 
+2.43.0
+

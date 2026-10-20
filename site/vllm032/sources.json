@@ -1,0 +1,104 @@
+{
+  "vllm": {
+    "base_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+    "patch_series": "site/vllm032/series",
+    "patchset_sha256": "b2a1618d3263e5bf8464da30cdeaabab9749248317fa4fed1e1c3869ca9d983e",
+    "expected_tree": "acca1b7746612f485b54899446a44c05eaadedd3",
+    "patch_head": "1be3f6362f9924389e377349fcfa5ff362af8925",
+    "capabilities": [
+      "disk-engram-local",
+      "native-fp4-cache",
+      "tilelang-kernels",
+      "adaptive-dspark",
+      "asynchronous-engram",
+      "tilelang-sparknet-collectives",
+      "direct-checkpoint-load",
+      "exact-greedy-verification",
+      "bounded-draft-preparation"
+    ],
+    "qualified_patch_head": "8e3eabe410353b104928b2bb0fe375587b4660eb"
+  },
+  "deployment_artifacts": {
+    "site/vllm032/_row_plan.h": "61403385d8a16e989e8c0930547d6896b6ec412d57b843b5647d51be5cc5a3c9",
+    "site/vllm032/_reader.c": "5ab2b8fa0df81edd9c5850296397a967691be673d2eed316a78822644d0a7fea",
+    "site/vllm032/embedding.py": "ef5f0a6d8bd043ec2b79beead76a4e4f4c166cc8e21f959bdcfdb20e40cb90f7",
+    "site/vllm032/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "site/vllm032/series": "38c82285e15c8ad24bc56796c4f4555311fb6e73a979c690a5deae7efd52f0c4",
+    "site/vllm032/weight_copy.py": "35daa01ed2ae7443aa1ec93dc0a9026c281e9f721bf5cd81f4ab69e73d0a90ec",
+    "site/vllm032/_native.py": "528723bde9d6e2843939ac5e46eeef9d5d53f81e221a3f0ff63f86094f9e1409",
+    "site/vllm032/Dockerfile": "f33570c21e0ab67f9ef1c95620bd30f0d3c071cdb0ef9440f320dcbda8f20c7f",
+    "site/vllm032/disk.py": "48e8004a326857ebe11fa9772e26965bac20d201ade300710825a798fe31b3e6",
+    "site/vllm032/upstream.patch": "d16667fff1bea0aad04266584676995f74a93a837e5a11e9d410c1a496d7c07a",
+    "site/vllm032/fp4.patch": "0501766fce20550dd7a4d9337cb6dfd85a37d841efbe5efb43b3ee59815e31fa",
+    "site/vllm032/test_fp4.py": "ea147761acdd9e3a2af72020ed11c18b7cd6537f16407ac139bad6d15d986e7a",
+    "site/vllm032/test_fp4_adapter.py": "ca6a2ca89b0d7b973ba4f9ae742bd3044cf3534011c73fa7079060bbf48836d6",
+    "site/vllm032/test_fp4_candidates.py": "79d4d183cb5c6f61a827dd028bab888a13cd3f0a4658934fb495d7593a102ec7",
+    "site/vllm032/native.patch": "bee40bc460b3c2b4ec598e378131cdfda604ab85ff0baf2bb724484be5c0785e"
+  },
+  "b12x_package": {
+    "version": "1.5.1",
+    "requirement": "official vLLM0.32 b12x extra"
+  },
+  "flashinfer_packages": {
+    "python": "0.7.1",
+    "cubin": "0.7.1",
+    "jit_cache": "0.7.1+cu130",
+    "providers": [
+      "sm120f",
+      "sm121a"
+    ],
+    "reason": "Runtime sparse MLA page sizes on SM121; official release v0.7.1"
+  },
+  "tilelang_compiler": {
+    "version": "0.1.15",
+    "image": "deepseek1017-vllm:r6x-tp4-64k",
+    "image_id": "sha256:6e18a9f0e37bfc30a995f33d7644dfd4991e5a3292d2b8aaea696512228e99a8",
+    "upstream": "https://github.com/tile-ai/tilelang",
+    "revision": "b95ee4ffb52ae26e15619cad38c6f41e7e0a2b46",
+    "patch_head": "a0e66d71fe7617216f2de5d86c3b088595367387",
+    "expected_tree": "222b895d04ee6cd75179155d06e0c0d450636f51",
+    "library_sha256": "04c6efebdd7a578c9e579977b1393a3623a19fbfbd780e2fb4a89ce86bb7b1cd"
+  },
+  "native_family": {
+    "source_tree": "4d6851c8bb1397a55254ba88905a87d9785b98dc",
+    "source_revision": "7316c7f9fae1bc4a0b7ab1848de0db4143eec5d2",
+    "role": "Qualified r6x model family ported onto the official vLLM0.32 core; no old runner or allocator replacement"
+  },
+  "tilelang": {
+    "base_revision": "b95ee4ffb52ae26e15619cad38c6f41e7e0a2b46",
+    "patch_series": "experiments/2026-10-17-r6u/tilelang/series",
+    "patchset_sha256": "7d097972b85ae6817f2e7314ed3446f9d61d3e77691c2d0097dc18548d11ee07",
+    "patch_head": "a0e66d71fe7617216f2de5d86c3b088595367387",
+    "expected_tree": "222b895d04ee6cd75179155d06e0c0d450636f51",
+    "submodules": {
+      "3rdparty/cutlass": "b2dd65dc864e09688245b316ac46c4a6cd07e15c",
+      "3rdparty/tvm": "4211874e9e4b8770fd20ad0d98ab80afd1df5028",
+      "3rdparty/tvm/3rdparty/OpenCL-Headers": "b590a6bfe034ea3a418b7b523e3490956bcb367a",
+      "3rdparty/tvm/3rdparty/cutlass": "b2dd65dc864e09688245b316ac46c4a6cd07e15c",
+      "3rdparty/tvm/3rdparty/cutlass_fpA_intB_gemm": "72b9883c986a2ff427ca61ac0b14ad59be1dc862",
+      "3rdparty/tvm/3rdparty/cutlass_fpA_intB_gemm/cutlass": "cc85b64cf676c45f98a17e3a47c0aafcf817f088",
+      "3rdparty/tvm/3rdparty/libflash_attn": "07ba35bae96900e51b4d63ef3487ba24850da870",
+      "3rdparty/tvm/3rdparty/libflash_attn/cutlass": "e0aaa3c3b38db9a89c31f04fef91e92123ad5e2e",
+      "3rdparty/tvm/3rdparty/tvm-ffi": "3c35034fd1026011736e19a4e0e1ed0f22058c42",
+      "3rdparty/tvm/3rdparty/tvm-ffi/3rdparty/dlpack": "84d107bf416c6bab9ae68ad285876600d230490d",
+      "3rdparty/tvm/3rdparty/tvm-ffi/3rdparty/libbacktrace": "793921876c981ce49759114d7bb89bb89b2d3a2d"
+    },
+    "verification": "bin/spark3 build prepare applies the series to the pinned revision, checks this patch head and tree, then checks out each submodule at the commit the patched tree records and compares the commits listed here; image label local.spark3.tilelang.tree matches, and the image build checks the installed tilelang against the wheel it built"
+  },
+  "tile_kernels": {
+    "base_revision": "66258df6175d2f630ffecb04c5ab66bff8a2ae6a",
+    "patch_series": "patches/tile_kernels/series",
+    "patchset_sha256": "3fed91bbd083d38b08de1bd7ebe25dbc7aec9d36f4e2b8f7adbfb497b128c22c",
+    "patch_head": "edfa64d018bc64006fcb07c95c32fa196363c0ae",
+    "expected_tree": "cb2fa41c8af290204c81c547ed678ebf957cca53",
+    "verification": "bin/spark3 build prepare checks out the pinned revision and checks this tree; image label local.spark3.tile_kernels.tree matches, and the image build checks the installed tile_kernels against the wheel it built"
+  },
+  "sparknet": {
+    "base_revision": "3bc8d10104a5012244a0424d7dfc1107a72eafab",
+    "patch_series": null,
+    "patchset_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "patch_head": "3bc8d10104a5012244a0424d7dfc1107a72eafab",
+    "expected_tree": "f72599fa212e894d67ee114553e628ab05daf2da",
+    "verification": "bin/spark3 build prepare checks out the pinned revision and checks this tree; image label local.spark3.sparknet.tree matches, and the image build checks the installed package version and builds the proxy"
+  }
+}

@@ -801,6 +801,34 @@ class MountTestScriptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.splitlines(), [f"rw {home}/missing dir"])
 
+    def test_named_volumes_are_checked_before_read_only_probes(self) -> None:
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            docker = Path(home, "docker")
+            actions = Path(home, "actions")
+            docker.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$ACTIONS\"\n"
+                              "case \"$*\" in *absent*) exit 1;; *unreadable*) exit 1;; esac\n")
+            docker.chmod(0o755)
+            cluster = {"host": {"home": home}, "container": {
+                "image": "probe-image", "mounts": [
+                    ["available", "/a", "ro"], ["absent", "/b", "ro"],
+                    ["unreadable", "/c", "ro"],
+                ],
+            }}
+            result = subprocess.run(["sh", "-c", spark.mount_test_script(cluster)],
+                                    capture_output=True, text=True,
+                                    env={**os.environ, "PATH": home+":"+os.environ["PATH"],
+                                         "ACTIONS": str(actions)})
+            commands = actions.read_text().splitlines()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ["ro absent", "ro unreadable"])
+        self.assertFalse(any(line.startswith("run ") and "absent" in line for line in commands))
+        self.assertTrue(any("--network=none --read-only --memory=128m" in line
+                            and "available:/probe:ro" in line for line in commands))
+
 
 class ClusterReplaceTest(unittest.TestCase):
     """start --replace stops every node's old container (concurrently) and rolls back on failure."""
